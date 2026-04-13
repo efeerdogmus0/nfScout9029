@@ -62,3 +62,137 @@ def test_epa_uses_mocked_statbotics(monkeypatch) -> None:
     response = client.get("/teams/frc1234/epa")
     assert response.status_code == 200
     assert response.json()["epa"] == 27.5
+
+
+def test_sync_upload_and_match_query() -> None:
+    payload = {
+        "device_id": "device-sync-1",
+        "reports": [
+            {
+                "event_key": "2026miket",
+                "match_key": "2026miket_qm9",
+                "team_key": "frc9999",
+                "scout_device_id": "device-sync-1",
+                "teleop_fuel_scored_active": 6,
+                "tower_level": "level_3",
+            },
+            {
+                "event_key": "2026miket",
+                "match_key": "2026miket_qm9",
+                "team_key": "frc0001",
+                "scout_device_id": "device-sync-1",
+                "teleop_fuel_scored_inactive": 4,
+                "tower_level": "level_1",
+            },
+        ],
+    }
+    sync_response = client.post("/sync/upload", json=payload)
+    assert sync_response.status_code == 200
+    assert sync_response.json()["device_upload_count"] == 2
+
+    query_response = client.get("/matches/2026miket_qm9/reports")
+    assert query_response.status_code == 200
+    assert len(query_response.json()) >= 2
+
+
+def test_win_predict_and_strategy_prompt() -> None:
+    prediction = client.post(
+        "/strategy/win-predict",
+        json={
+            "our_epa": 33.0,
+            "opponent_epa": 29.5,
+            "our_live_cycle_ms": [8500, 9000, 8700],
+            "opponent_live_cycle_ms": [9700, 10100],
+            "our_active_fuel": 10,
+            "opponent_active_fuel": 8,
+        },
+    )
+    assert prediction.status_code == 200
+    assert 0 <= prediction.json()["win_probability"] <= 1
+
+    prompt = client.post(
+        "/strategy/prompt",
+        json={
+            "cycle_times": [9700, 10100],
+            "hotspots": ["trench", "bump"],
+            "hub_state": "inactive",
+        },
+    )
+    assert prompt.status_code == 200
+    assert "REBUILT" in prompt.json()["prompt"]
+
+
+def test_live_hub_state_and_refinery() -> None:
+    hub = client.get("/live/hub-state/current")
+    assert hub.status_code == 200
+    assert hub.json()["hub_state"] in ["active", "inactive"]
+
+    rev = client.post(
+        "/refinery/revise",
+        json={
+            "match_key": "2026miket_qm11",
+            "team_key": "frc1111",
+            "revised_events": [{"t_ms": 55000, "action": "score", "x": 111, "y": 44}],
+            "foul_notes": ["g12 maybe"],
+            "inventory_capacity": 6,
+        },
+    )
+    assert rev.status_code == 200
+    assert rev.json()["revised_count"] == 1
+
+
+def test_warroom_overlay_and_tactical() -> None:
+    overlay = client.post(
+        "/warroom/multi-path-overlay",
+        json={
+            "match_key": "2026miket_qf1m1",
+            "paths": [
+                {"robot": "frc1", "points": [{"t_ms": 2000, "x": 100, "y": 100}]},
+                {"robot": "frc2", "points": [{"t_ms": 2000, "x": 106, "y": 103}]},
+                {"robot": "frc3", "points": [{"t_ms": 2000, "x": 220, "y": 140}]},
+            ],
+        },
+    )
+    assert overlay.status_code == 200
+    assert len(overlay.json()["warnings"]) >= 1
+
+    tactical = client.post(
+        "/warroom/tactical-insight",
+        json={
+            "opponent_team": "frc9999",
+            "last_three_match_hotspots": ["right_trench", "right_trench", "hub_front_right"],
+            "cycle_times": [9800, 10100, 9600],
+        },
+    )
+    assert tactical.status_code == 200
+    assert "Rakip" in tactical.json()["insight"]
+
+
+def test_active_qualification_uses_mocked_tba(monkeypatch) -> None:
+    async def mock_schedule(*_args, **_kwargs):
+        return [
+            {
+                "key": "2026miket_qm18",
+                "comp_level": "qm",
+                "actual_time": None,
+                "predicted_time": 9999999999,
+                "alliances": {
+                    "red": {"team_keys": ["frc1", "frc2", "frc3"]},
+                    "blue": {"team_keys": ["frc4", "frc5", "frc6"]},
+                },
+            }
+        ]
+
+    monkeypatch.setattr(main_module, "fetch_tba_schedule", mock_schedule)
+    response = client.get("/events/2026miket/active-qual")
+    assert response.status_code == 200
+    assert response.json()["match_key"] == "2026miket_qm18"
+
+
+def test_scout_login_assigns_fixed_seat() -> None:
+    ok = client.post("/auth/scout-login", json={"username": "scout_red_1", "pin": "1111"})
+    assert ok.status_code == 200
+    assert ok.json()["seat"] == "red1"
+
+    bad = client.post("/auth/scout-login", json={"username": "scout_red_1", "pin": "9999"})
+    assert bad.status_code == 401

@@ -17,8 +17,32 @@ export async function saveReport(report) {
   }
 }
 
-export function getOfflineReports() {
-  return JSON.parse(localStorage.getItem("reports") || "[]");
+export async function getOfflineReports() {
+  try {
+    const db = await openDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const request = tx.objectStore(STORE).getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  } catch {
+    return JSON.parse(localStorage.getItem("reports") || "[]");
+  }
+}
+
+export async function clearOfflineReports() {
+  try {
+    const db = await openDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    localStorage.removeItem("reports");
+  }
 }
 
 function openDb() {
