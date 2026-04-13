@@ -192,16 +192,34 @@ async def event_teams(event_key: str, tba_key: str | None = None) -> list[str]:
             raise HTTPException(status_code=502, detail=f"TBA_FETCH_ERROR: {exc}")
 
 
+def _build_schedule_item(match: dict) -> MatchScheduleItem:
+    alliances = match.get("alliances", {})
+    red_al  = alliances.get("red",  {})
+    blue_al = alliances.get("blue", {})
+    red_score  = red_al.get("score")
+    blue_score = blue_al.get("score")
+    # TBA returns -1 for unplayed matches
+    if red_score is not None and red_score < 0:
+        red_score = None
+    if blue_score is not None and blue_score < 0:
+        blue_score = None
+    winning = match.get("winning_alliance") or None
+    if winning == "":
+        winning = None
+    return MatchScheduleItem(
+        match_key=match["key"],
+        red=red_al.get("team_keys", []),
+        blue=blue_al.get("team_keys", []),
+        red_score=red_score,
+        blue_score=blue_score,
+        winning_alliance=winning,
+    )
+
+
 @app.get("/events/{event_key}/schedule", response_model=list[MatchScheduleItem])
 async def event_schedule(event_key: str, tba_key: str | None = None) -> list[MatchScheduleItem]:
     schedule = await fetch_tba_schedule(event_key, api_key=_resolve_tba_key(tba_key))
-    items: list[MatchScheduleItem] = []
-    for match in schedule:
-        alliances = match.get("alliances", {})
-        red  = alliances.get("red",  {}).get("team_keys", [])
-        blue = alliances.get("blue", {}).get("team_keys", [])
-        items.append(MatchScheduleItem(match_key=match["key"], red=red, blue=blue))
-    return items
+    return [_build_schedule_item(m) for m in schedule]
 
 
 @app.get("/events/{event_key}/played-quals", response_model=list[MatchScheduleItem])
@@ -209,13 +227,7 @@ async def played_qualifications(event_key: str, tba_key: str | None = None) -> l
     schedule = await fetch_tba_schedule(event_key, api_key=_resolve_tba_key(tba_key))
     played = [m for m in schedule if m.get("comp_level") == "qm" and m.get("actual_time") is not None]
     played.sort(key=lambda m: m.get("match_number", 0))
-    items = []
-    for match in played:
-        alliances = match.get("alliances", {})
-        red  = alliances.get("red",  {}).get("team_keys", [])
-        blue = alliances.get("blue", {}).get("team_keys", [])
-        items.append(MatchScheduleItem(match_key=match["key"], red=red, blue=blue))
-    return items
+    return [_build_schedule_item(m) for m in played]
 
 
 @app.get("/events/{event_key}/all-matches", response_model=list[MatchDetailItem])

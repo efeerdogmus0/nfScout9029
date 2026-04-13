@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import AdminPanel        from "./components/AdminPanel";
 import WarRoomDashboard  from "./components/WarRoomDashboard";
+import TestDataPanel     from "./components/TestDataPanel";
 import EyesFreeTerminal from "./components/EyesFreeTerminal";
 import PitScoutPanel    from "./components/PitScoutPanel";
 import VideoScoutPanel  from "./components/VideoScoutPanel";
@@ -9,6 +10,9 @@ import {
   validateLogin, getScoutDisplayName,
   getFieldCredentials, getPitCredentials, getVideoCredentials, getAdminCredential,
 } from "./adminConfig";
+import { getOfflineReports } from "./storage";
+import { syncReportsIfOnline } from "./sync";
+import QrImportModal from "./components/QrImportModal";
 
 const SESSION_KEY = "appAuth";
 
@@ -31,7 +35,10 @@ const TABS = [
   { key: "video",   label: "🎬 Video",     adminOnly: false },
   { key: "warroom", label: "⚡ War Room",  adminOnly: true  },
   { key: "admin",   label: "⚙️ Admin",    adminOnly: true  },
+  { key: "test",    label: "🧪 Test",     adminOnly: true  },
 ];
+
+const DEVICE_ID = `app-${Math.random().toString(36).slice(2, 8)}`;
 
 // ─── UNIFIED LOGIN SCREEN ─────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
@@ -137,11 +144,28 @@ function LoginScreen({ onLogin }) {
 
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [auth, setAuth] = useState(getStoredAuth);
-  const [mode, setMode] = useState(() => {
+  const [auth,       setAuth]       = useState(getStoredAuth);
+  const [mode,       setMode]       = useState(() => {
     const a = getStoredAuth();
     return a ? (ROLE_DEFAULT[a.role] || "eyes") : "eyes";
   });
+  const [syncToast,  setSyncToast]  = useState("");
+  const [showImport, setShowImport] = useState(false);
+
+  // Auto-sync offline reports when network is restored
+  useEffect(() => {
+    const handleOnline = async () => {
+      const reports = await getOfflineReports().catch(() => []);
+      if (!reports.length) return;
+      const { synced } = await syncReportsIfOnline(DEVICE_ID, reports);
+      if (synced > 0) {
+        setSyncToast(`✓ ${synced} rapor otomatik gönderildi`);
+        setTimeout(() => setSyncToast(""), 4000);
+      }
+    };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, []);
 
   function login(cred) {
     const a = {
@@ -176,14 +200,23 @@ export default function App() {
             {t.label}
           </button>
         ))}
+        {isAdmin && (
+          <button className="app-nav-import" onClick={() => setShowImport(true)} title="QR İçe Aktar">
+            📥
+          </button>
+        )}
         <button className="app-nav-logout" onClick={logout} title="Çıkış yap">⏻</button>
       </nav>
 
       {mode === "eyes"    && <EyesFreeTerminal auth={auth} onLogout={logout} />}
       {mode === "pit"     && <PitScoutPanel    auth={auth} onLogout={logout} />}
       {mode === "video"   && <VideoScoutPanel />}
-      {mode === "warroom" && <WarRoomPlaceholder />}
+      {mode === "warroom" && <WarRoomDashboard />}
+      {mode === "test"    && <TestDataPanel />}
       {mode === "admin"   && <AdminPanel />}
+
+      {syncToast && <div className="sync-toast">{syncToast}</div>}
+      {showImport && <QrImportModal onClose={() => setShowImport(false)} />}
     </>
   );
 }

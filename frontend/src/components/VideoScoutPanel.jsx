@@ -78,9 +78,10 @@ export default function VideoScoutPanel() {
   const [playing,    setPlaying] = useState(false);
 
   // Fuel + shoot tracking
-  const [entries,      setEntries]      = useState(() => SEATS.map((s) => ({ seat: s, fuelScored: "", maxCarried: "", shoots: [] })));
-  const [shootState,   setShootState]   = useState({});   // { seat: startTimeSec }
-  const [submitStatus, setSubmitStatus] = useState("");
+  const [entries,       setEntries]      = useState(() => SEATS.map((s) => ({ seat: s, fuelScored: "", maxCarried: "", shoots: [] })));
+  const [shootState,    setShootState]   = useState({});   // { seat: startTimeSec }
+  const [matchStartSec, setMatchStartSec] = useState(null); // video timestamp when match started
+  const [submitStatus,  setSubmitStatus] = useState("");
 
   // ── Admin config sync ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -111,6 +112,7 @@ export default function VideoScoutPanel() {
     setZoom(1); setPan({ x: 0, y: 0 }); setPanMode(false); setPlaying(false);
     setEntries(SEATS.map((s) => ({ seat: s, fuelScored: "", maxCarried: "", shoots: [] })));
     setShootState({});
+    setMatchStartSec(null);
     setSubmitStatus("");
   }
 
@@ -195,9 +197,21 @@ export default function VideoScoutPanel() {
   }
   function onOverlayUp() { panDragRef.current = null; }
 
-  // ── Shoot tracking ────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────────
   function getVideoTime() {
     return playerRef.current?.getCurrentTime?.() ?? null;
+  }
+
+  function fmtSec(s) {
+    if (s == null) return "";
+    const m = Math.floor(s / 60);
+    const r = Math.floor(s % 60);
+    return `${m}:${String(r).padStart(2, "0")}`;
+  }
+
+  function markMatchStart() {
+    const t = getVideoTime();
+    if (t !== null) setMatchStartSec(+t.toFixed(2));
   }
 
   function shootStart(seat) {
@@ -222,12 +236,38 @@ export default function VideoScoutPanel() {
   async function submitFuel() {
     if (!selected) { setSubmitStatus("Önce maç seç."); return; }
     setSubmitStatus("Kaydediliyor...");
+
+    // Seat → team_key mapping
+    const seatToTeam = (seat) => {
+      const pos = parseInt(seat.slice(-1)) - 1;
+      if (seat.startsWith("red"))  return selected.red[pos]  || null;
+      if (seat.startsWith("blue")) return selected.blue[pos] || null;
+      return null;
+    };
+
+    // Persist fuel data locally so War Room analytics can use it
+    try {
+      const stored = JSON.parse(localStorage.getItem("videoFuelData") || "{}");
+      if (!stored[selected.match_key]) stored[selected.match_key] = {};
+      entries.forEach((e) => {
+        const tk = seatToTeam(e.seat);
+        if (!tk) return;
+        stored[selected.match_key][tk] = {
+          fuel_scored: parseInt(e.fuelScored) || 0,
+          max_carried: parseInt(e.maxCarried) || 0,
+        };
+      });
+      localStorage.setItem("videoFuelData", JSON.stringify(stored));
+      window.dispatchEvent(new Event("videoFuelChanged"));
+    } catch { /* localStorage failure non-fatal */ }
+
     try {
       const r = await fetch(`${API_BASE}/video-scout/fuel-entry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          match_key: selected.match_key,
+          match_key:       selected.match_key,
+          match_start_sec: matchStartSec,
           entries: entries.map((e) => ({
             seat:        e.seat,
             fuel_scored: parseInt(e.fuelScored) || 0,
@@ -236,8 +276,8 @@ export default function VideoScoutPanel() {
           })),
         }),
       });
-      setSubmitStatus(r.ok ? "✓ Kaydedildi." : "✗ Hata oluştu.");
-    } catch { setSubmitStatus("✗ Bağlantı yok."); }
+      setSubmitStatus(r.ok ? "✓ Kaydedildi." : "✗ Sunucu hatası — yerel kayıt tamam.");
+    } catch { setSubmitStatus("✓ Yerel kayıt tamam. (Çevrimdışı)"); }
   }
 
   const filtered = compFilter === "all" ? matches : matches.filter((m) => m.comp_level === compFilter);
@@ -314,6 +354,18 @@ export default function VideoScoutPanel() {
                 </div>
 
                 <div className="vs2-controls">
+                  {/* Match start marker */}
+                  <div className="vs2-ctrl-row vs2-match-start-row">
+                    <button
+                      className={`vs2-match-start-btn${matchStartSec !== null ? " marked" : ""}`}
+                      onClick={matchStartSec !== null ? () => setMatchStartSec(null) : markMatchStart}
+                      title={matchStartSec !== null ? "Sıfırlamak için tıkla" : "Videonun bu anını maç başlangıcı olarak işaretle"}>
+                      {matchStartSec !== null
+                        ? `✅ MAÇ BAŞI: ${fmtSec(matchStartSec)} (${matchStartSec}s) — sıfırla`
+                        : "🏁 MAÇ BAŞLADI"}
+                    </button>
+                  </div>
+
                   {/* Seek + play */}
                   <div className="vs2-ctrl-row">
                     <button className="vs2-ctrl-btn" onClick={() => seek(-10)}>−10s</button>

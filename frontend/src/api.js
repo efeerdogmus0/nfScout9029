@@ -14,7 +14,55 @@ export async function fetchActiveQualification(eventKey) {
   return response.json();
 }
 
+/**
+ * Fetch EPA data from Statbotics for all teams at an event.
+ * Returns { [teamKey]: { epa, epaSd, rank, wins, losses, winrate } } or {}.
+ *
+ * Statbotics REST API v3:
+ *   GET https://api.statbotics.io/v3/team_events?event={key}&limit=100
+ *   Response fields we use:
+ *     team                        → integer team number
+ *     epa.total_points.mean       → mean EPA (used as primary strength metric)
+ *     epa.total_points.sd         → standard deviation
+ *     epa.stats.max               → season-best EPA at this event
+ *     record.qual.rank            → qualification ranking
+ *     record.qual.wins/losses     → qual record
+ *     record.qual.winrate         → win rate
+ */
+export async function fetchEPA(eventKey) {
+  try {
+    const res = await fetch(
+      `https://api.statbotics.io/v3/team_events?event=${eventKey}&limit=100`,
+      { headers: { Accept: "application/json" } }
+    );
+    if (!res.ok) return {};
+    const data = await res.json();
+    const out = {};
+    for (const te of (data || [])) {
+      if (!te.team || te.epa?.total_points?.mean == null) continue;
+      out[`frc${te.team}`] = {
+        epa:     +te.epa.total_points.mean.toFixed(1),
+        epaSd:   te.epa.total_points.sd != null ? +te.epa.total_points.sd.toFixed(1) : null,
+        epaMax:  te.epa.stats?.max != null ? +te.epa.stats.max.toFixed(1) : null,
+        rank:    te.record?.qual?.rank  ?? null,
+        numTeams: te.record?.qual?.num_teams ?? null,
+        wins:    te.record?.qual?.wins   ?? null,
+        losses:  te.record?.qual?.losses ?? null,
+        winrate: te.record?.qual?.winrate != null
+          ? +(te.record.qual.winrate * 100).toFixed(0)
+          : null,
+      };
+    }
+    return out;
+  } catch { return {}; }
+}
+
 export async function fetchSchedule(eventKey) {
+  // Allow locally-generated test schedules to bypass the backend
+  const mock = localStorage.getItem(`mockSchedule_${eventKey}`);
+  if (mock) {
+    try { return JSON.parse(mock); } catch { /* fall through */ }
+  }
   const response = await fetch(`${API_BASE}/events/${eventKey}/schedule${tbaParams()}`);
   if (!response.ok) throw new Error("schedule fetch failed");
   return response.json();
@@ -85,6 +133,29 @@ export async function runOverlay(payload) {
   });
   if (!response.ok) throw new Error("overlay failed");
   return response.json();
+}
+
+/**
+ * Fetch full match data (including score_breakdown) from TBA.
+ * Returns the raw TBA match object, or null on failure.
+ *
+ * 2026 REBUILT score_breakdown fuel fields (1 ball = 1 point):
+ *   autoFuelPoints             — auto phase (both hubs active)
+ *   transitionShiftFuelPoints  — 10s transition both hubs
+ *   shift1FuelPoints … shift4FuelPoints  — alternating hub shifts
+ *   endGameFuelPoints          — last 30s both hubs
+ */
+export async function fetchMatchData(matchKey) {
+  const key = getTbaKey();
+  if (!key) return null;
+  try {
+    const res = await fetch(
+      `https://www.thebluealliance.com/api/v3/match/${matchKey}`,
+      { headers: { "X-TBA-Auth-Key": key } }
+    );
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
 }
 
 export async function submitRefineryRevision(payload) {

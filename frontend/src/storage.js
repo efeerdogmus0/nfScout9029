@@ -45,6 +45,25 @@ export async function clearOfflineReports() {
   }
 }
 
+/**
+ * Merge video-scout fuel data (localStorage "videoFuelData") into field reports.
+ * For each report, if matching video fuel entry exists, fill in the fuel fields.
+ */
+export function enrichReportsWithVideoFuel(reports) {
+  let videoFuel = {};
+  try { videoFuel = JSON.parse(localStorage.getItem("videoFuelData") || "{}"); } catch {}
+  return reports.map((r) => {
+    const matchFuel = videoFuel[r.match_key];
+    if (!matchFuel || !matchFuel[r.team_key]) return r;
+    const vf = matchFuel[r.team_key];
+    return {
+      ...r,
+      teleop_fuel_scored_active:   vf.fuel_scored ?? r.teleop_fuel_scored_active,
+      auto_fuel_scored:             r.auto_fuel_scored || 0,
+    };
+  });
+}
+
 function openDb() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);

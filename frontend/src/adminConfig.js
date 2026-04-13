@@ -1,6 +1,6 @@
 const KEY = "adminConfig";
 
-const DEFAULTS = { eventKey: "2026miket", tbaKey: "", pitScoutCount: 2, rotationMatchCount: 12, scoutNames: {}, myTeam: "" };
+const DEFAULTS = { eventKey: "2026miket", tbaKey: "", openrouterKey: "", openrouterModel: "", pitScoutCount: 2, rotationMatchCount: 12, scoutNames: {}, myTeam: "" };
 
 // ─── BASIC CONFIG ─────────────────────────────────────────────────────────────
 export function getAdminConfig() {
@@ -16,6 +16,8 @@ export function getEventKey()     { return getAdminConfig().eventKey || DEFAULTS
 export function getTbaKey()       { return getAdminConfig().tbaKey  || ""; }
 export function getPitScoutCount(){ return getAdminConfig().pitScoutCount ?? 2; }
 /** Our team number, normalised to "frcXXX" format. */
+export function getOpenRouterKey()   { return getAdminConfig().openrouterKey   || ""; }
+export function getOpenRouterModel() { return getAdminConfig().openrouterModel || ""; }
 export function getMyTeam() {
   const raw = (getAdminConfig().myTeam || "").trim();
   if (!raw) return "";

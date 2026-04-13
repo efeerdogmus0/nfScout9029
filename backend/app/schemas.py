@@ -43,6 +43,9 @@ class MatchScheduleItem(BaseModel):
     match_key: str
     red: list[str]
     blue: list[str]
+    red_score: int | None = None
+    blue_score: int | None = None
+    winning_alliance: str | None = None  # "red" | "blue" | "tie" | None
 
 
 class MatchDetailItem(BaseModel):

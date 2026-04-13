@@ -7,6 +7,7 @@ import {
   getFullSchedule,
   setScoutName, getScoutNames,
 } from "../adminConfig";
+import { fetchEventTeams } from "../api";
 import FieldSetupTool from "./FieldSetupTool";
 
 const KNOWN_EVENTS = [
@@ -52,14 +53,101 @@ function ShiftBadge({ status }) {
   return <span className="shift-badge shift-break">☕ {status.matchesLeft}m · →{status.nextChangeAt}</span>;
 }
 
+// ─── PIT TAB (with missing-team summary) ─────────────────────────────────────
+function PitTab({ pitCount, pitCreds, scoutNames, changePitCount, config }) {
+  const [allTeams,  setAllTeams]  = useState([]);
+  const [loadState, setLoadState] = useState("idle"); // "idle"|"loading"|"error"
+
+  // Pit reports stored in localStorage
+  const pitReports = (() => {
+    try { return JSON.parse(localStorage.getItem("pitReports")) || {}; } catch { return {}; }
+  })();
+
+  const scouted = new Set(Object.keys(pitReports));
+  const missing = allTeams.filter(tk => !scouted.has(tk));
+
+  function loadTeams() {
+    if (!config.eventKey) return;
+    setLoadState("loading");
+    fetchEventTeams(config.eventKey)
+      .then(({ teams, error }) => {
+        if (error || !teams.length) setLoadState("error");
+        else { setAllTeams(teams); setLoadState("done"); }
+      })
+      .catch(() => setLoadState("error"));
+  }
+
+  return (
+    <>
+      <p className="admin-section-label">Pit Scout Sayısı</p>
+      <div className="admin-pit-stepper">
+        <button onClick={() => changePitCount(-1)} disabled={pitCount <= 1}>−</button>
+        <span className="admin-pit-count">{pitCount}</span>
+        <button onClick={() => changePitCount(+1)} disabled={pitCount >= 8}>+</button>
+        <span className="admin-pit-note">Yarışma takımları bu sayıya bölünür</span>
+      </div>
+
+      {/* ── Missing pit teams ── */}
+      <div className="admin-missing-pit-section">
+        <div className="admin-section-label" style={{ marginTop: "1.5rem", display:"flex", alignItems:"center", gap:"0.6rem" }}>
+          🚨 Eksik Pit Raporları
+          {loadState !== "loading" && (
+            <button className="admin-missing-refresh" onClick={loadTeams}>
+              {loadState === "idle" ? "TBA'dan Yükle" : "↻ Yenile"}
+            </button>
+          )}
+        </div>
+        {loadState === "loading" && <p className="admin-pit-info">Yükleniyor…</p>}
+        {loadState === "error"   && <p className="admin-pit-info" style={{ color:"#f87171" }}>TBA anahtarı geçersiz veya bağlantı yok.</p>}
+        {loadState === "done" && (
+          missing.length === 0
+            ? <p className="admin-pit-info" style={{ color:"#4ade80" }}>✓ Tüm {allTeams.length} takım scouting edildi!</p>
+            : (
+              <>
+                <p className="admin-pit-info">
+                  {scouted.size} / {allTeams.length} takım scouting edildi —{" "}
+                  <strong style={{ color:"#fbbf24" }}>{missing.length} eksik</strong>
+                </p>
+                <div className="admin-missing-grid">
+                  {missing.map(tk => (
+                    <span key={tk} className="admin-missing-chip">{tk.replace("frc","")}</span>
+                  ))}
+                </div>
+              </>
+            )
+        )}
+      </div>
+
+      <p className="admin-section-label" style={{ marginTop: "1.5rem" }}>👷 Pit Scout Girişleri</p>
+      <div className="admin-cred-table">
+        <div className="admin-cred-head">
+          <span>Kullanıcı</span><span>İsim</span><span>PIN</span><span>Koltuk</span>
+        </div>
+        {pitCreds.map((c) => (
+          <div key={c.username} className="admin-cred-row is-pit">
+            <span className="admin-cred-user">{c.username}</span>
+            <NameInput username={c.username} initialName={scoutNames[c.username] || ""} />
+            <span className="admin-cred-pin">{c.pin}</span>
+            <span className="admin-cred-seat">{c.seat.toUpperCase()}</span>
+          </div>
+        ))}
+      </div>
+      <p className="admin-pit-info">Pit scoutlar <strong>🔍 Pit</strong> ekranına bu bilgilerle giriş yapar.</p>
+    </>
+  );
+}
+
 // ─── MAIN ────────────────────────────────────────────────────────────────────
 export default function AdminPanel() {
   const [tab,      setTab]      = useState("settings");
   const [config,   setConfig]   = useState(getAdminConfig);
   const [custom,   setCustom]   = useState("");
   const [saved,    setSaved]    = useState(false);
-  const [tbaInput,    setTbaInput]    = useState(() => getAdminConfig().tbaKey || "");
-  const [myTeamInput, setMyTeamInput] = useState(() => getAdminConfig().myTeam || "");
+  const [tbaInput,       setTbaInput]       = useState(() => getAdminConfig().tbaKey          || "");
+  const [orKeyInput,     setOrKeyInput]     = useState(() => getAdminConfig().openrouterKey   || "");
+  const [orModelInput,   setOrModelInput]   = useState(() => getAdminConfig().openrouterModel || "");
+  const [orSaved,        setOrSaved]        = useState(false);
+  const [myTeamInput,  setMyTeamInput] = useState(() => getAdminConfig().myTeam   || "");
   const [tbaSaved, setTbaSaved] = useState(false);
   const [pitCount,          setPitCount]          = useState(getPitScoutCount);
   const [currentMatchNum,   setCurrentMatchNumSt] = useState(getCurrentMatchNum);
@@ -171,6 +259,38 @@ export default function AdminPanel() {
             : <p className="admin-status" style={{ color: "#ef4444" }}>⚠ Key girilmedi.</p>}
           <div className="admin-status">Seçili event: <strong>{config.eventKey}</strong></div>
 
+          <p className="admin-section-label" style={{ marginTop: "1.5rem" }}>
+            🤖 OpenRouter API Key{" "}
+            <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer"
+              style={{ color: "var(--accent)", fontSize: "0.65rem" }}>
+              (openrouter.ai/keys)
+            </a>
+          </p>
+          <div className="admin-custom-row">
+            <input type="password" placeholder="sk-or-..." value={orKeyInput}
+              onChange={(e) => setOrKeyInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const next = { ...config, openrouterKey: orKeyInput.trim(), openrouterModel: orModelInput.trim() };
+                  setConfig(next); setAdminConfig(next);
+                  setOrSaved(true); setTimeout(() => setOrSaved(false), 1500);
+                }
+              }} autoComplete="off" />
+            <button onClick={() => {
+              const next = { ...config, openrouterKey: orKeyInput.trim(), openrouterModel: orModelInput.trim() };
+              setConfig(next); setAdminConfig(next);
+              setOrSaved(true); setTimeout(() => setOrSaved(false), 1500);
+            }}>KAYDET</button>
+          </div>
+          <div className="admin-custom-row" style={{ marginTop: "0.4rem" }}>
+            <input placeholder="Model (boş = x-ai/grok-4-fast)"
+              value={orModelInput} onChange={(e) => setOrModelInput(e.target.value)} />
+          </div>
+          {orSaved && <p className="admin-saved">✓ OpenRouter ayarları kaydedildi.</p>}
+          {config.openrouterKey
+            ? <p className="admin-status">Key: {config.openrouterKey.slice(0, 10)}… ✓ · model: {config.openrouterModel || "grok-4-fast"}</p>
+            : <p className="admin-status" style={{ color: "#ef4444" }}>⚠ Key girilmedi — War Room AI kapalı.</p>}
+
           <p className="admin-section-label" style={{ marginTop: "1.5rem" }}>🤖 Takım Numaramız</p>
           <div className="admin-custom-row">
             <input placeholder="Örn: 254 veya frc254" value={myTeamInput}
@@ -269,30 +389,10 @@ export default function AdminPanel() {
 
       {/* ── PIT TAYFA ── */}
       {tab === "pit" && (
-        <>
-          <p className="admin-section-label">Pit Scout Sayısı</p>
-          <div className="admin-pit-stepper">
-            <button onClick={() => changePitCount(-1)} disabled={pitCount <= 1}>−</button>
-            <span className="admin-pit-count">{pitCount}</span>
-            <button onClick={() => changePitCount(+1)} disabled={pitCount >= 8}>+</button>
-            <span className="admin-pit-note">Yarışma takımları bu sayıya bölünür</span>
-          </div>
-          <p className="admin-section-label" style={{ marginTop: "1.5rem" }}>👷 Pit Scout Girişleri</p>
-          <div className="admin-cred-table">
-            <div className="admin-cred-head">
-              <span>Kullanıcı</span><span>İsim</span><span>PIN</span><span>Koltuk</span>
-            </div>
-            {pitCreds.map((c) => (
-              <div key={c.username} className="admin-cred-row is-pit">
-                <span className="admin-cred-user">{c.username}</span>
-                <NameInput username={c.username} initialName={scoutNames[c.username] || ""} />
-                <span className="admin-cred-pin">{c.pin}</span>
-                <span className="admin-cred-seat">{c.seat.toUpperCase()}</span>
-              </div>
-            ))}
-          </div>
-          <p className="admin-pit-info">Pit scoutlar <strong>🔍 Pit</strong> ekranına bu bilgilerle giriş yapar.</p>
-        </>
+        <PitTab
+          pitCount={pitCount} pitCreds={pitCreds} scoutNames={scoutNames}
+          changePitCount={changePitCount} config={config}
+        />
       )}
 
       {/* ── CALIBRATION ── */}

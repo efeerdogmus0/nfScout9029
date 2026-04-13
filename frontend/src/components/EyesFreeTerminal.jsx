@@ -289,12 +289,13 @@ const TRAVERSALS = [
 
 // ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
 export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
-  const canvasRef     = useRef(null);
-  const wrapRef       = useRef(null);   // canvas container — for ResizeObserver
-  const matchStartRef = useRef(null);
-  const fieldImgRef   = useRef(null);   // loaded field photo
-  const climbRef      = useRef(null);
-  const lastPingRef   = useRef(null);
+  const canvasRef      = useRef(null);
+  const wrapRef        = useRef(null);   // canvas container — for ResizeObserver
+  const matchStartRef  = useRef(null);
+  const fieldImgRef    = useRef(null);   // loaded field photo
+  const fieldRatioRef  = useRef(CW / CH); // aspect ratio of the field photo (default 2:1)
+  const climbRef       = useRef(null);
+  const lastPingRef    = useRef(null);
   const dragRef       = useRef(null);   // index of dot being dragged, or null
 
   // Event from admin config
@@ -386,6 +387,22 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     };
   }, []);
 
+  // ── fitCanvas: size canvas CSS to match field photo ratio, filling the wrap ───
+  // Must be defined before any effect or callback that calls it.
+  const fitCanvas = () => {
+    const wrap   = wrapRef.current;
+    const canvas = canvasRef.current;
+    if (!wrap || !canvas) return;
+    const { clientWidth: w, clientHeight: h } = wrap;
+    if (!w || !h) return;
+    const ratio = fieldRatioRef.current; // matches uploaded field photo
+    let cssW, cssH;
+    if (w / h >= ratio) { cssH = h; cssW = cssH * ratio; }
+    else                { cssW = w; cssH = cssW / ratio; }
+    canvas.style.width  = `${Math.round(cssW)}px`;
+    canvas.style.height = `${Math.round(cssH)}px`;
+  };
+
   // ── Load field photo + zones (once on mount, refresh on storage change) ──────
   useEffect(() => {
     FIELD = loadFieldZones();
@@ -395,7 +412,11 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
       const img = new Image();
       img.onload = () => {
         fieldImgRef.current = img;
-        // Trigger a redraw so the photo shows immediately
+        // Track the photo's real aspect ratio so the canvas matches it exactly
+        if (img.naturalWidth && img.naturalHeight) {
+          fieldRatioRef.current = img.naturalWidth / img.naturalHeight;
+        }
+        fitCanvas();
         drawField(canvasRef.current, {
           autoPath: [], timeline: [], pingGlow: false,
           fieldImg: img,
@@ -433,24 +454,15 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     if (navigator.vibrate) navigator.vibrate(120);
   }, [elapsedMs, isRunning, autoWinnerLocked]);
 
-  // ── Canvas ResizeObserver: maintain 2:1 aspect ratio ─────────────────────────
+  // ── Canvas ResizeObserver ─────────────────────────────────────────────────────
   useEffect(() => {
     const wrap = wrapRef.current;
-    const canvas = canvasRef.current;
-    if (!wrap || !canvas) return;
-    const fit = () => {
-      const { clientWidth: w, clientHeight: h } = wrap;
-      const ratio = CW / CH; // 2
-      let cssW, cssH;
-      if (w / h >= ratio) { cssH = h; cssW = cssH * ratio; }
-      else                { cssW = w; cssH = cssW / ratio; }
-      canvas.style.width  = `${Math.round(cssW)}px`;
-      canvas.style.height = `${Math.round(cssH)}px`;
-    };
-    const ro = new ResizeObserver(fit);
+    if (!wrap) return;
+    const ro = new ResizeObserver(fitCanvas);
     ro.observe(wrap);
-    fit();
+    fitCanvas();
     return () => ro.disconnect();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── Teleop→Endgame vibrate ───────────────────────────────────────────────────
@@ -672,7 +684,21 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     const climbs = timeline.filter((e) => e.action === "climb");
     const climb  = climbs.length ? climbs[climbs.length - 1].value : "none";
     const report = toBackendReport({ eventKey, matchKey: effectiveMatch?.match_key || "unknown", teamKey: teamLabel, seat, autoPath, timeline, foulCount, postMatchData, climb });
-    await saveReport({ match_key: report.match_key, team_key: report.team_key, timeline, auto_path_points: autoPath });
+    // Normalise pixel-space coords to 0-1 for consistent analytics consumption
+    const normPath     = autoPath.map(p => ({ ...p, x: p.x / CW, y: p.y / CH }));
+    const normTimeline = timeline.map(ev =>
+      ev.action === "ping" ? { ...ev, x: ev.x / CW, y: ev.y / CH } : ev
+    );
+    // Normalise tower_level to "L1"/"L2"/"L3" for teamAnalytics compatibility
+    const normTowerLevel = (report.tower_level || "none")
+      .replace("level_", "L").replace(/^L(\d)$/, (_, n) => `L${n}`);
+    await saveReport({
+      ...report,
+      auto_path_points: normPath,
+      timeline: normTimeline,
+      location_pings: report.location_pings.map(p => ({ ...p, x: p.x / CW, y: p.y / CH })),
+      tower_level: normTowerLevel,
+    });
     if (navigator.onLine) {
       try {
         const r = await fetch("http://localhost:8001/sync/upload", {
@@ -789,8 +815,8 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
           <span className="ef-ping-countdown">{pingCountdown}s</span>
         </div>
       )}
-      {/* TRAVERSAL ROW — big TRENCH + BUMP buttons */}
-      {(isTransition || isTeleop) && (
+      {/* TRAVERSAL ROW — big TRENCH + BUMP buttons (teleop + endgame) */}
+      {(isTransition || isTeleop || isEndgame) && (
         <div className="ef-traversal-row">
           {TRAVERSALS.map((t) => {
             const count = timeline.filter((e) => e.action === "traversal" && e.key === t.key).length;
@@ -804,8 +830,8 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
         </div>
       )}
 
-      {/* ISSUE ROW — small problem + foul buttons */}
-      {(isTransition || isTeleop) && (
+      {/* ISSUE ROW — small problem + foul buttons (teleop + endgame) */}
+      {(isTransition || isTeleop || isEndgame) && (
         <div className="ef-issue-row">
           {PROBLEMS.map((p) => (
             <button key={p.key} className="ef-issue-sm" onClick={() => logProblem(p.key)}>{p.label}</button>
@@ -816,7 +842,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
         </div>
       )}
 
-      {/* ENDGAME CLIMB */}
+      {/* ENDGAME CLIMB — L1/L2/L3 (shown alongside traversal+issue rows) */}
       {isEndgame && (
         <div className="ef-endgame">
           {[1, 2, 3].map((lvl) => (
@@ -923,6 +949,11 @@ function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOve
 
       {/* Qual number stepper */}
       <div className="ef-qual-stepper">
+        <button className="ef-qs-btn" onClick={() => {
+          const cur = parseInt(inputVal) || (qualNum ?? 1);
+          const next = Math.max(1, cur - 1);
+          setInputVal(String(next)); onQualChange(next);
+        }}>−</button>
         <span className="ef-qs-label">QUAL</span>
         <input
           className="ef-qs-input"
@@ -932,6 +963,11 @@ function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOve
           onBlur={(e) => commitInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
         />
+        <button className="ef-qs-btn" onClick={() => {
+          const cur = parseInt(inputVal) || (qualNum ?? 0);
+          const next = cur + 1;
+          setInputVal(String(next)); onQualChange(next);
+        }}>+</button>
         {isOverridden && (
           <button className="ef-qs-reset" onClick={() => { onQualChange(null); setInputVal(qualNum != null ? String(qualNum) : ""); }} title="TBA'ya dön">↺ TBA</button>
         )}
@@ -986,7 +1022,7 @@ function toBackendReport({ eventKey, matchKey, teamKey, seat, autoPath, timeline
   return {
     event_key: eventKey, match_key: matchKey, team_key: teamKey,
     scout_device_id: `seat-${seat}`,
-    auto_path_points: autoPath,
+    auto_path_points: autoPath.map(p => ({ ...p, x: p.x / CW, y: p.y / CH })),
     auto_fuel_scored: 0,
     teleop_fuel_scored_active: 0, teleop_fuel_scored_inactive: 0,
     hub_state_samples: [],
@@ -995,7 +1031,7 @@ function toBackendReport({ eventKey, matchKey, teamKey, seat, autoPath, timeline
     tower_level: climb === "none" ? "none" : climb,
     teleop_shoot_timestamps_ms: [],
     location_pings: pings.map((p) => ({
-      t_ms: p.t_ms, x: p.x, y: p.y,
+      t_ms: p.t_ms, x: p.x / CW, y: p.y / CH,
       near_bump:   p.zone === "bump",
       near_trench: p.zone === "trench",
     })),

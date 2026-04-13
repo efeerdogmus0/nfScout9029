@@ -12,6 +12,10 @@ const LS_KEY = "pitReports"; // { [teamKey]: PitReport }
 
 // ─── CAPABILITY SCHEMA ────────────────────────────────────────────────────────
 // Capability toggle groups
+const SWERVE_MODELS = ["MK4", "MK4i", "MK4n", "MK5", "MK5n", "SDS Diğer", "Swerve X", "WCP SwerveX", "Diğer"];
+const SWERVE_RATIOS = ["L1", "L2", "L3", "L4"];
+const LL_MODELS = ["LL1", "LL2", "LL2+", "LL3", "LL3G", "LL4"];
+
 const CAPS = [
   {
     key: "drive",
@@ -68,6 +72,7 @@ function loadReports() {
 
 function saveReports(reports) {
   localStorage.setItem(LS_KEY, JSON.stringify(reports));
+  window.dispatchEvent(new Event("pitReportsChanged"));
 }
 
 /** Divide teams among pit scouts in round-robin fashion.
@@ -145,6 +150,15 @@ function PitTeamForm({ teamKey, report, onChange }) {
             <span className="pit-score-hint">aktif shiftte kaç fuel atabiliyor?</span>
           </div>
 
+          {/* Fuel per second */}
+          <div className="pit-score-field">
+            <label>⚡ Fuel / Saniye</label>
+            <input type="number" min="0" max="30" step="0.5" placeholder="~kaç?"
+              value={report.fuelPerSec ?? ""}
+              onChange={(e) => set("fuelPerSec", e.target.value)} />
+            <span className="pit-score-hint">atış hızı (fuel/sn)</span>
+          </div>
+
           {/* Carrier capacity */}
           <div className="pit-score-field">
             <label>📦 Taşıma Kapasitesi</label>
@@ -157,18 +171,95 @@ function PitTeamForm({ teamKey, report, onChange }) {
         </div>
 
         {/* RP contribution estimate */}
-        {(report.teleopFuel || report.autoFuel) && (() => {
-          const af = parseInt(report.autoFuel)   || 0;
-          const tf = parseInt(report.teleopFuel) || 0;
+        {(report.teleopFuel || report.autoFuel || report.fuelPerSec) && (() => {
+          const af  = parseInt(report.autoFuel)   || 0;
+          const tf  = parseInt(report.teleopFuel) || 0;
+          const fps = parseFloat(report.fuelPerSec);
           const total = af + tf;
-          const energized   = total >= 34  ? "✅ ENERGIZED'a katkı olabilir (3 robot ~100)"  : `🔸 ${34 - total} fuel daha → ENERGIZED eşiğine yaklaş (34/robot)`;
+          const energized = total >= 34
+            ? "✅ ENERGIZED'a katkı olabilir (3 robot ~100)"
+            : `🔸 ${34 - total} fuel daha → ENERGIZED eşiğine yaklaş (34/robot)`;
           return (
             <div className="pit-rp-hint">
               <strong>Tahmini katkı:</strong> ~{total} fuel/maç
-              &nbsp;·&nbsp;{energized}
+              {!isNaN(fps) && fps > 0 && (
+                <>&nbsp;·&nbsp;atış hızı <strong>{fps} f/sn</strong> → ~{Math.round(fps * 90)} fuel/maç kapasitesi</>
+              )}
+              {total > 0 && <>&nbsp;·&nbsp;{energized}</>}
             </div>
           );
         })()}
+      </div>
+
+      {/* ── DRIVETRAIN DETAILS ── */}
+      <div className="pit-caps">
+        {/* Swerve modülü — sadece Swerve seçiliyse göster */}
+        {report.drive === "Swerve" && (
+          <>
+            <div className="pit-cap-group">
+              <span className="pit-cap-label">Swerve Modülü</span>
+              <div className="pit-cap-options">
+                {SWERVE_MODELS.map((m) => (
+                  <button key={m}
+                    className={`pit-cap-btn${report.swerveModel === m ? " selected" : ""}`}
+                    onClick={() => set("swerveModel", report.swerveModel === m ? null : m)}>
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="pit-cap-group">
+              <span className="pit-cap-label">Tork Oranı (Ratio)</span>
+              <div className="pit-cap-options">
+                {SWERVE_RATIOS.map((r) => (
+                  <button key={r}
+                    className={`pit-cap-btn${report.swerveRatio === r ? " selected" : ""}`}
+                    onClick={() => set("swerveRatio", report.swerveRatio === r ? null : r)}>
+                    {r}
+                  </button>
+                ))}
+                {/* Serbest tork girişi */}
+                <input
+                  className="pit-inline-input"
+                  placeholder="Özel (ör. L2+)"
+                  value={report.swerveRatioCustom || ""}
+                  onChange={(e) => set("swerveRatioCustom", e.target.value)}
+                />
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Limelight */}
+        <div className="pit-cap-group">
+          <span className="pit-cap-label">Limelight Modeli</span>
+          <div className="pit-cap-options">
+            {LL_MODELS.map((m) => (
+              <button key={m}
+                className={`pit-cap-btn${(report.limelights || []).includes(m) ? " selected" : ""}`}
+                onClick={() => {
+                  const cur = report.limelights || [];
+                  set("limelights", cur.includes(m) ? cur.filter((x) => x !== m) : [...cur, m]);
+                }}>
+                {m}
+              </button>
+            ))}
+          </div>
+          {(report.limelights || []).length > 0 && (
+            <div className="pit-ll-count-row">
+              <span className="pit-cap-label" style={{ marginTop: 0 }}>Limelight Adedi</span>
+              <div className="pit-cap-options">
+                {[1, 2, 3, 4].map((n) => (
+                  <button key={n}
+                    className={`pit-cap-btn${report.limelightCount === n ? " selected" : ""}`}
+                    onClick={() => set("limelightCount", report.limelightCount === n ? null : n)}>
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Capability selectors */}
@@ -220,6 +311,53 @@ function PitTeamForm({ teamKey, report, onChange }) {
           placeholder="Takımla konuşurken öğrenilen bilgiler..."
           value={report.interviewNotes || ""}
           onChange={(e) => set("interviewNotes", e.target.value)} />
+      </div>
+
+      {/* ── INSPECTION ── */}
+      <div className="pit-inspection-section">
+        <span className="pit-section-title">🔎 İnspeksiyon</span>
+
+        <div className="pit-inspection-row">
+          {/* Weight */}
+          <div className="pit-insp-field">
+            <label>⚖️ Başlangıç Ağırlığı</label>
+            <div className="pit-insp-weight-wrap">
+              <input
+                type="number" min="0" max="200" step="0.1"
+                placeholder="kg"
+                className="pit-insp-weight-input"
+                value={report.inspectionWeight ?? ""}
+                onChange={(e) => set("inspectionWeight", e.target.value)}
+              />
+              <span className="pit-insp-unit">kg</span>
+            </div>
+            <span className="pit-score-hint">limit: 125 lb ≈ 56.7 kg</span>
+          </div>
+
+          {/* Pass / Fail */}
+          <div className="pit-insp-field">
+            <label>✅ Durum</label>
+            <div className="pit-insp-status-btns">
+              {[
+                { val: "passed",   label: "✓ Geçti",     cls: "insp-pass"    },
+                { val: "failed",   label: "✗ Kaldı",     cls: "insp-fail"    },
+                { val: "pending",  label: "⏳ Bekliyor",  cls: "insp-pending" },
+              ].map(({ val, label, cls }) => (
+                <button key={val}
+                  className={`pit-insp-btn ${cls}${report.inspectionStatus === val ? " selected" : ""}`}
+                  onClick={() => set("inspectionStatus", report.inspectionStatus === val ? null : val)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <label className="pit-notes-label">İnspeksiyon Notları</label>
+        <textarea className="pit-textarea" rows={2}
+          placeholder="Örn: kablo düzensiz, düzeltmesi istendi · bumper yüksekliği sınırda · ilk inspeksiyonda kaldı..."
+          value={report.inspectionNotes || ""}
+          onChange={(e) => set("inspectionNotes", e.target.value)} />
       </div>
     </div>
   );
