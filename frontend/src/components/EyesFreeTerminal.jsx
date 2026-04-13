@@ -290,10 +290,9 @@ const TRAVERSALS = [
 // ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
 export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
   const canvasRef      = useRef(null);
-  const wrapRef        = useRef(null);   // canvas container — for ResizeObserver
+  const wrapRef        = useRef(null);
   const matchStartRef  = useRef(null);
   const fieldImgRef    = useRef(null);   // loaded field photo
-  const fieldRatioRef  = useRef(CW / CH); // aspect ratio of the field photo (default 2:1)
   const climbRef       = useRef(null);
   const lastPingRef    = useRef(null);
   const dragRef       = useRef(null);   // index of dot being dragged, or null
@@ -331,6 +330,17 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
 
   // Post-match
   const [postMatchData, setPostMatchData] = useState({ note: "" });
+
+  // Save hint — small bottom feedback bar {msg, id}
+  const [saveHint,    setSaveHint]    = useState(null);
+  const saveHintTimer = useRef(null);
+  const saveHintId    = useRef(0);
+  function flash(msg) {
+    const id = ++saveHintId.current;
+    setSaveHint({ msg, id });
+    clearTimeout(saveHintTimer.current);
+    saveHintTimer.current = setTimeout(() => setSaveHint(null), 2000);
+  }
 
   // Output
   const [syncStatus, setSyncStatus] = useState("");
@@ -387,22 +397,6 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     };
   }, []);
 
-  // ── fitCanvas: size canvas CSS to match field photo ratio, filling the wrap ───
-  // Must be defined before any effect or callback that calls it.
-  const fitCanvas = () => {
-    const wrap   = wrapRef.current;
-    const canvas = canvasRef.current;
-    if (!wrap || !canvas) return;
-    const { clientWidth: w, clientHeight: h } = wrap;
-    if (!w || !h) return;
-    const ratio = fieldRatioRef.current; // matches uploaded field photo
-    let cssW, cssH;
-    if (w / h >= ratio) { cssH = h; cssW = cssH * ratio; }
-    else                { cssW = w; cssH = cssW / ratio; }
-    canvas.style.width  = `${Math.round(cssW)}px`;
-    canvas.style.height = `${Math.round(cssH)}px`;
-  };
-
   // ── Load field photo + zones (once on mount, refresh on storage change) ──────
   useEffect(() => {
     FIELD = loadFieldZones();
@@ -412,11 +406,6 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
       const img = new Image();
       img.onload = () => {
         fieldImgRef.current = img;
-        // Track the photo's real aspect ratio so the canvas matches it exactly
-        if (img.naturalWidth && img.naturalHeight) {
-          fieldRatioRef.current = img.naturalWidth / img.naturalHeight;
-        }
-        fitCanvas();
         drawField(canvasRef.current, {
           autoPath: [], timeline: [], pingGlow: false,
           fieldImg: img,
@@ -454,16 +443,6 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     if (navigator.vibrate) navigator.vibrate(120);
   }, [elapsedMs, isRunning, autoWinnerLocked]);
 
-  // ── Canvas ResizeObserver ─────────────────────────────────────────────────────
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    const ro = new ResizeObserver(fitCanvas);
-    ro.observe(wrap);
-    fitCanvas();
-    return () => ro.disconnect();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ── Teleop→Endgame vibrate ───────────────────────────────────────────────────
   useEffect(() => {
@@ -583,6 +562,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
   function saveAuto() {
     setAutoSaved(true);
     setShowAutoWinner(true);
+    flash(`✅ Oto yolu kaydedildi (${autoPath.length} nokta)`);
   }
 
   // ── Canvas pointer handling (draw, drag, ping) ───────────────────────────────
@@ -612,6 +592,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
       } else if (isAuto) {
         // Add new waypoint only during active auto drawing (not review)
         setAutoPath((prev) => [...prev, { x, y, t_ms: nowMs() }]);
+        flash("📍 Oto nokta eklendi");
       }
       return;
     }
@@ -621,6 +602,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
       addEvent(ev);
       lastPingRef.current     = ev;
       lastPingTimeRef.current = Date.now();
+      flash("📍 Konum işaretlendi");
     }
   }
 
@@ -642,6 +624,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     setFoulCount((v) => v + 1);
     addEvent({ t_ms: nowMs(), action: "foul", note: "" });
     setShowFoulNote(true);
+    flash("🟨 Faul kaydedildi");
   }
   function saveFoulNote() {
     if (foulNote.trim()) {
@@ -660,12 +643,16 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     if (!isRunning) return;
     addEvent({ t_ms: nowMs(), action: "problem", key });
     if (navigator.vibrate) navigator.vibrate([50, 30, 50]);
+    const label = PROBLEMS.find(p => p.key === key)?.label ?? key.toUpperCase();
+    flash(`⚠️ ${label} işaretlendi`);
   }
 
   function logTraversal(key) {
     if (!isRunning) return;
     addEvent({ t_ms: nowMs(), action: "traversal", key });
     if (navigator.vibrate) navigator.vibrate(40);
+    const label = TRAVERSALS.find(t => t.key === key)?.label ?? key.toUpperCase();
+    flash(`🔀 ${label} geçişi kaydedildi`);
   }
 
   // ── Climb ────────────────────────────────────────────────────────────────────
@@ -675,8 +662,10 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
   }
   function onClimbUp() {
     if (!climbRef.current) return;
-    addEvent({ t_ms: climbRef.current.t_ms, action: "climb", value: climbRef.current.level, duration_ms: Date.now() - climbRef.current.startedAt });
+    const { level } = climbRef.current;
+    addEvent({ t_ms: climbRef.current.t_ms, action: "climb", value: level, duration_ms: Date.now() - climbRef.current.startedAt });
     climbRef.current = null;
+    flash(`🧗 Tırmanma ${level} kaydedildi`);
   }
 
   // ── Post-match submit ────────────────────────────────────────────────────────
@@ -843,6 +832,13 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
       )}
 
       {/* ENDGAME CLIMB — L1/L2/L3 (shown alongside traversal+issue rows) */}
+      {/* SAVE HINT — small confirmation bar */}
+      {saveHint && (
+        <div className="ef-save-hint" key={saveHint.id}>
+          {saveHint.msg}
+        </div>
+      )}
+
       {isEndgame && (
         <div className="ef-endgame">
           {[1, 2, 3].map((lvl) => (
@@ -1002,13 +998,12 @@ function resolveSeatTeam(activeQual, seat) {
 // "The ALLIANCE that scores the most FUEL during AUTO will have their HUB
 //  set to inactive for SHIFT 1" — then alternates each shift.
 function computeHubState({ elapsedMs, autoWinner, scoutAlliance }) {
+  // AUTO + TRANSITION SHIFT + END GAME: both hubs always active (game manual §6.4)
+  if (elapsedMs < TRANSITION_END_MS) return "active";  // covers AUTO + TRANSITION
+  if (elapsedMs >= TELEOP_END_MS)    return "active";  // covers ENDGAME
+  // SHIFTS 1-4: depends on who won auto — need autoWinner
   if (!autoWinner) return "inactive";
-  // AUTO, TRANSITION SHIFT, END GAME: both hubs active
-  if (elapsedMs < TRANSITION_END_MS) return "active";
-  if (elapsedMs >= TELEOP_END_MS)    return "active";
-  // SHIFTS 1-4: 25s each, starting at TRANSITION_END_MS
   const shiftIndex = Math.floor((elapsedMs - TRANSITION_END_MS) / SHIFT_MS); // 0-3
-  // autoWinner is INACTIVE in odd-indexed shifts (0, 2) and ACTIVE in (1, 3)
   const autoWinnerActive = (shiftIndex % 2 === 1);
   const myHubActive = scoutAlliance === autoWinner ? autoWinnerActive : !autoWinnerActive;
   return myHubActive ? "active" : "inactive";
