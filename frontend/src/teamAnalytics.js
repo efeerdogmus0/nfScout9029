@@ -639,12 +639,6 @@ export function formatInsightsForPrompt(teamKey, a) {
       lines.push(`  • Rakip bumpı kullandığında ${diff > 0 ? "daha düşük" : "daha yüksek"} skor (kendi:${bc.ownBump.avgFuel}F, rakip:${bc.oppBump.avgFuel}F).`);
   }
 
-  const hvb = a.hubVsBump;
-  if (hvb.hubHeavy.n && hvb.bumpHeavy.n) {
-    const diff = ((hvb.hubHeavy.avgFuel||0) - (hvb.bumpHeavy.avgFuel||0)).toFixed(1);
-    if (Math.abs(diff) >= 4)
-      lines.push(`  • Hub-ağırlıklı maçlarda ${diff > 0 ? "+" : ""}${diff}F fark.`);
-  }
 
   const af = a.allianceFuel;
   if (af.red != null && af.blue != null && af.redN >= 2 && af.blueN >= 2) {
@@ -717,15 +711,6 @@ export function getCardInsights(a) {
     });
   }
 
-  const hvb = a.hubVsBump;
-  if (hvb.hubHeavy.n && hvb.bumpHeavy.n && hvb.hubHeavy.avgFuel != null && hvb.bumpHeavy.avgFuel != null) {
-    const delta = +(hvb.hubHeavy.avgFuel - hvb.bumpHeavy.avgFuel).toFixed(0);
-    if (Math.abs(delta) >= 5) insights.push({
-      icon: delta > 0 ? "🎯" : "🔄",
-      text: delta > 0 ? `Hub'da ${delta}F fazla` : `Bump trafiğinde ${-delta}F fazla`,
-      kind: "info",
-    });
-  }
 
   const af = a.allianceFuel;
   if (af.red != null && af.blue != null && af.redN >= 2 && af.blueN >= 2) {

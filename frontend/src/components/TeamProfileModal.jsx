@@ -673,25 +673,29 @@ function OverviewTab({ pit, analysis, epaEntry }) {
             </div>
           </div>
 
-          {/* Bump correlation */}
-          <div className="tp-corr-rows">
-            <div className="tp-section-title" style={{ marginTop:"0.6rem" }}>Bump / Hub Korelasyonu</div>
-            {[
-              ["Kendi bumpı", analysis.bumpCorr.ownBump],
-              ["Rakip bumpu", analysis.bumpCorr.oppBump],
-              ["Bumpsız", analysis.bumpCorr.noBumps],
-              ["Hub-ağırlıklı", analysis.hubVsBump.hubHeavy],
-              ["Bump-ağırlıklı", analysis.hubVsBump.bumpHeavy],
-            ].filter(([,v]) => v?.n > 0).map(([label, v]) => (
-              <div key={label} className="tp-corr-row">
-                <span className="tp-corr-label">{label} ({v.n}m)</span>
-                <div className="tp-corr-bar-bg">
-                  <div className="tp-corr-bar" style={{ width: `${Math.min(100, (v.avgFuel || 0) * 1.5)}%` }} />
+          {/* Bump side correlation */}
+          {[
+            ["Kendi bumpı kullandığında", analysis.bumpCorr.ownBump],
+            ["Rakip bumpunu kullandığında", analysis.bumpCorr.oppBump],
+            ["Bump kullanmadığında", analysis.bumpCorr.noBumps],
+          ].some(([,v]) => v?.n > 0) && (
+            <div className="tp-corr-rows">
+              <div className="tp-section-title" style={{ marginTop:"0.6rem" }}>Bump Yan Korelasyonu</div>
+              {[
+                ["Kendi bumpı kullandığında", analysis.bumpCorr.ownBump],
+                ["Rakip bumpunu kullandığında", analysis.bumpCorr.oppBump],
+                ["Bump kullanmadığında", analysis.bumpCorr.noBumps],
+              ].filter(([,v]) => v?.n > 0).map(([label, v]) => (
+                <div key={label} className="tp-corr-row">
+                  <span className="tp-corr-label">{label} ({v.n}m)</span>
+                  <div className="tp-corr-bar-bg">
+                    <div className="tp-corr-bar" style={{ width: `${Math.min(100, (v.avgFuel || 0) * 1.5)}%` }} />
+                  </div>
+                  <span className="tp-corr-val">{v.avgFuel ?? "—"}F</span>
                 </div>
-                <span className="tp-corr-val">{v.avgFuel ?? "—"}F</span>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
 
           {/* Traversal zone breakdown */}
           {(analysis.totalBumpTraversals > 0 || analysis.totalTrenchTraversals > 0) && (
@@ -709,7 +713,7 @@ function OverviewTab({ pit, analysis, epaEntry }) {
                       const pct  = Math.round(cnt / analysis.totalBumpTraversals * 100);
                       return (
                         <div key={z} className="tp-trav-row">
-                          <span className="tp-trav-zone">{z.replace(/_/g," ").replace("red","K").replace("blue","M")}</span>
+                          <span className="tp-trav-zone">{ZONE_LABEL[z] ?? z}</span>
                           <div className="tp-trav-bar-bg">
                             <div className="tp-trav-bar" style={{ width:`${pct}%` }} />
                           </div>
@@ -729,7 +733,7 @@ function OverviewTab({ pit, analysis, epaEntry }) {
                       const pct  = Math.round(cnt / analysis.totalTrenchTraversals * 100);
                       return (
                         <div key={z} className="tp-trav-row">
-                          <span className="tp-trav-zone">{z.replace(/_/g," ").replace("red","K").replace("blue","M")}</span>
+                          <span className="tp-trav-zone">{ZONE_LABEL[z] ?? z}</span>
                           <div className="tp-trav-bar-bg">
                             <div className="tp-trav-bar tp-trav-bar--trench" style={{ width:`${pct}%` }} />
                           </div>
