@@ -1,0 +1,21 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 0;
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+main {
+  padding: 1rem;
+}
+
+button {
+  margin-right: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+section {
+  background: #1e293b;
+  padding: 1rem;
+  border-radius: 8px;
+}
