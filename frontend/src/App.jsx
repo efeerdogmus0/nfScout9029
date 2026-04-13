@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import AdminPanel        from "./components/AdminPanel";
 import WarRoomDashboard  from "./components/WarRoomDashboard";
 import TestDataPanel     from "./components/TestDataPanel";
+import UserManual        from "./components/UserManual";
 import EyesFreeTerminal from "./components/EyesFreeTerminal";
 import PitScoutPanel    from "./components/PitScoutPanel";
 import VideoScoutPanel  from "./components/VideoScoutPanel";
@@ -36,6 +37,7 @@ const TABS = [
   { key: "warroom", label: "⚡ War Room",  adminOnly: true  },
   { key: "admin",   label: "⚙️ Admin",    adminOnly: true  },
   { key: "test",    label: "🧪 Test",     adminOnly: true  },
+  { key: "manual",  label: "📖 Kılavuz",  adminOnly: false },
 ];
 
 const DEVICE_ID = `app-${Math.random().toString(36).slice(2, 8)}`;
@@ -214,6 +216,7 @@ export default function App() {
       {mode === "warroom" && <WarRoomDashboard />}
       {mode === "test"    && <TestDataPanel />}
       {mode === "admin"   && <AdminPanel />}
+      {mode === "manual"  && <UserManual />}
 
       {syncToast && <div className="sync-toast">{syncToast}</div>}
       {showImport && <QrImportModal onClose={() => setShowImport(false)} />}

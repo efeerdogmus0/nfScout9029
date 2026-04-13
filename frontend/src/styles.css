@@ -3255,3 +3255,330 @@ canvas { border: 1px solid #1e3a5f; border-radius: 8px; display: block; width: 1
   margin: 0;
 }
 .wr-ai-para strong { color: var(--accent); font-weight: 700; }
+
+/* ═══════════════════════════════════════════════════════════════
+   USER MANUAL
+   ═══════════════════════════════════════════════════════════════ */
+.um-root {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-deep);
+}
+
+/* ── Sidebar TOC ──────────────────────────────────────────────── */
+.um-toc {
+  width: 180px;
+  flex-shrink: 0;
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 0.6rem 0;
+}
+.um-toc-title {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  text-transform: uppercase;
+  padding: 0.4rem 0.9rem 0.6rem;
+}
+.um-toc-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.12s;
+  width: 100%;
+  white-space: nowrap;
+}
+.um-toc-item:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.um-toc-item.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: rgba(22,163,74,0.08);
+  font-weight: 700;
+}
+
+/* ── Content Area ─────────────────────────────────────────────── */
+.um-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 2rem 3rem;
+  max-width: 860px;
+}
+
+/* ── Hero ─────────────────────────────────────────────────────── */
+.um-hero {
+  padding: 2.5rem 0 2rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+.um-hero-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  background: rgba(22,163,74,0.12);
+  border: 1px solid rgba(22,163,74,0.3);
+  border-radius: 20px;
+  padding: 0.2rem 0.75rem;
+  margin-bottom: 0.7rem;
+  text-transform: uppercase;
+}
+.um-hero-title {
+  font-size: 2.6rem;
+  font-weight: 900;
+  color: var(--text);
+  letter-spacing: 0.04em;
+  margin: 0 0 0.3rem;
+}
+.um-hero-sub {
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+/* ── Section ──────────────────────────────────────────────────── */
+.um-section {
+  padding-top: 2rem;
+  margin-bottom: 0.5rem;
+  scroll-margin-top: 0.5rem;
+}
+.um-section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 1.35rem;
+  font-weight: 800;
+  color: var(--text);
+  margin: 0 0 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.um-section-icon { font-size: 1.3rem; }
+.um-h3 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  margin: 1.4rem 0 0.5rem;
+  text-transform: uppercase;
+}
+.um-p {
+  font-size: 0.88rem;
+  color: var(--text);
+  line-height: 1.65;
+  margin: 0 0 0.8rem;
+}
+.um-ol, .um-ul {
+  font-size: 0.88rem;
+  color: var(--text);
+  line-height: 1.8;
+  padding-left: 1.4rem;
+  margin: 0 0 0.8rem;
+}
+.um-ol li, .um-ul li { margin-bottom: 0.15rem; }
+
+/* ── Table ────────────────────────────────────────────────────── */
+.um-table-wrap {
+  overflow-x: auto;
+  margin: 0.6rem 0 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.um-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.um-table th {
+  background: var(--bg-panel);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.55rem 0.9rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.um-table td {
+  padding: 0.5rem 0.9rem;
+  color: var(--text);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  vertical-align: top;
+}
+.um-table tr:last-child td { border-bottom: none; }
+.um-table tr:hover td { background: rgba(255,255,255,0.025); }
+
+/* ── Note callout ─────────────────────────────────────────────── */
+.um-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.9rem;
+  border-left: 3px solid;
+  border-radius: 0 6px 6px 0;
+  background: rgba(255,255,255,0.03);
+  font-size: 0.83rem;
+  color: var(--text);
+  line-height: 1.55;
+  margin: 0.4rem 0 0.9rem;
+}
+.um-note-icon { flex-shrink: 0; font-size: 1rem; }
+
+/* ── Keyboard key ─────────────────────────────────────────────── */
+.um-kbd {
+  display: inline-block;
+  padding: 0.1em 0.45em;
+  font-size: 0.78em;
+  font-family: monospace;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.1);
+  vertical-align: middle;
+}
+
+/* ── Code inline ──────────────────────────────────────────────── */
+.um-code {
+  font-family: monospace;
+  font-size: 0.82em;
+  background: rgba(255,255,255,0.07);
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+  color: #86efac;
+}
+
+/* ── Link ─────────────────────────────────────────────────────── */
+.um-link { color: var(--accent); text-decoration: underline; }
+.um-link:hover { opacity: 0.8; }
+
+/* ── Phase cards ──────────────────────────────────────────────── */
+.um-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.6rem 0 0.9rem;
+}
+.um-phase {
+  border-left: 3px solid;
+  background: var(--bg-card);
+  border-radius: 0 6px 6px 0;
+  padding: 0.5rem 0.9rem;
+}
+.um-phase-header {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-bottom: 0.2rem;
+}
+.um-phase-time {
+  font-size: 0.72rem;
+  font-family: monospace;
+  color: var(--muted);
+  background: rgba(255,255,255,0.06);
+  padding: 0.1em 0.5em;
+  border-radius: 4px;
+}
+.um-phase-label { font-size: 0.82rem; font-weight: 800; letter-spacing: 0.06em; }
+.um-phase-desc  { font-size: 0.82rem; color: var(--text); line-height: 1.5; }
+
+/* ── Feature grid ─────────────────────────────────────────────── */
+.um-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.7rem;
+  margin: 0.8rem 0 1rem;
+}
+.um-feature-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.85rem 0.9rem;
+}
+.um-feature-icon { font-size: 1.5rem; margin-bottom: 0.3rem; }
+.um-feature-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 0.25rem;
+}
+.um-feature-desc { font-size: 0.76rem; color: var(--muted); line-height: 1.45; }
+
+/* ── Tab cards (Takım Profili) ────────────────────────────────── */
+.um-tab-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.7rem;
+  margin: 0.6rem 0 1rem;
+}
+.um-tab-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.85rem;
+}
+.um-tab-card-title {
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.04em;
+}
+.um-tab-card .um-ul {
+  font-size: 0.8rem;
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+/* ── FAQ ──────────────────────────────────────────────────────── */
+.um-faq-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  margin-bottom: 0.55rem;
+}
+.um-faq-q {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 0.35rem;
+}
+.um-faq-a {
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+/* ── Footer ───────────────────────────────────────────────────── */
+.um-footer {
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* ── Responsive: hide TOC on narrow screens ───────────────────── */
+@media (max-width: 600px) {
+  .um-toc { display: none; }
+  .um-content { padding: 0 1rem 3rem; }
+  .um-hero-title { font-size: 1.9rem; }
+}
