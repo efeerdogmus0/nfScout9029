@@ -424,6 +424,25 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
+  // ── Canvas sizing: fill wrapper exactly (no aspect-ratio math) ──────────────
+  useEffect(() => {
+    const wrap   = wrapRef.current;
+    const canvas = canvasRef.current;
+    if (!wrap || !canvas) return;
+    function syncSize() {
+      const w = wrap.clientWidth;
+      const h = wrap.clientHeight;
+      if (w > 0 && h > 0) {
+        canvas.style.width  = w + "px";
+        canvas.style.height = h + "px";
+      }
+    }
+    syncSize();
+    const ro = new ResizeObserver(syncSize);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, []);
+
   // ── Timer ────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (matchPhase !== "running") return;
