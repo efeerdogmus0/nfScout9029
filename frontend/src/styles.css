@@ -751,8 +751,47 @@ section.terminal canvas { max-width: 640px; }
 .app-quick-grid {
   display: grid; gap: 0.4rem; width: 100%;
 }
-.app-quick-grid--field { grid-template-columns: repeat(6, 1fr); }
-.app-quick-grid--sm    { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); }
+.app-quick-grid--sm { grid-template-columns: repeat(auto-fill, minmax(68px, 1fr)); }
+
+/* ── Field Scout Login Form ── */
+.app-field-login {
+  display: flex; flex-direction: column; gap: 0.6rem;
+  width: 100%; margin-bottom: 0.5rem;
+}
+.app-field-name-input {
+  width: 100%; padding: 0.6rem 0.8rem;
+  background: var(--bg-deep); border: 1.5px solid var(--border);
+  border-radius: 8px; color: var(--fg); font-size: 1rem;
+  text-align: center; letter-spacing: 0.02em;
+}
+.app-field-name-input:focus { border-color: var(--accent); outline: none; }
+.app-seat-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem;
+}
+.app-seat-btn {
+  border-radius: 8px; border: 2px solid; padding: 0.5rem 0.3rem;
+  cursor: pointer; transition: all 0.15s; display: flex;
+  flex-direction: column; align-items: center; gap: 0.1rem;
+  min-height: 54px; justify-content: center;
+}
+.app-seat-btn.seat-red  { background: #1c0a0a; border-color: rgba(248,113,113,0.4); }
+.app-seat-btn.seat-blue { background: #0a0f1c; border-color: rgba(96,165,250,0.4); }
+.app-seat-btn.seat-red.seat-selected  { background: #7f1d1d; border-color: #ef4444; }
+.app-seat-btn.seat-blue.seat-selected { background: #1e3a8a; border-color: #60a5fa; }
+.app-seat-btn.seat-taken { opacity: 0.55; }
+.seat-label    { font-size: 1rem; font-weight: 900; color: var(--fg); }
+.seat-pos      { font-size: 0.6rem; color: var(--muted); }
+.seat-occupant { font-size: 0.62rem; color: #fbbf24; font-weight: 600;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 72px; }
+.app-field-go-btn {
+  width: 100%; padding: 0.7rem;
+  background: var(--accent); color: #000;
+  border: none; border-radius: 8px;
+  font-size: 0.95rem; font-weight: 800; letter-spacing: 0.04em;
+  cursor: pointer; transition: opacity 0.15s;
+}
+.app-field-go-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.app-field-go-btn:not(:disabled):hover { opacity: 0.88; }
 
 .app-quick-btn {
   padding: 0.5rem 0.3rem; border-radius: 7px;
@@ -2176,18 +2215,15 @@ section.terminal canvas { max-width: 640px; }
 }
 
 /* Shift card on ready screen */
-.ef-shift-card {
-  display: flex; align-items: center; gap: 0.6rem;
-  padding: 0.6rem 1rem; border-radius: 10px;
-  margin-bottom: 0.8rem; font-size: 0.82rem; line-height: 1.4;
-  max-width: 380px; width: 100%;
+/* Scout identity card (replaces shift card) */
+.ef-scout-card {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.5rem 1rem; border-radius: 10px;
+  margin-bottom: 0.8rem; max-width: 380px; width: 100%;
+  background: var(--bg-card); border: 1px solid var(--border-dim);
 }
-.ef-shift-card.shift-active  { background: rgba(74,222,128,0.1);  border: 1px solid rgba(74,222,128,0.3); }
-.ef-shift-card.shift-break   { background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.25); }
-.ef-shift-card.shift-unknown { background: var(--bg-card);         border: 1px solid var(--border-dim); color: var(--muted); }
-.ef-shift-icon { font-size: 1.1rem; flex-shrink: 0; }
-.ef-shift-text { flex: 1; }
-.ef-shift-text em     { font-style: normal; font-weight: 700; }
+.ef-scout-name { font-size: 0.9rem; font-weight: 700; color: var(--fg); }
+.ef-scout-seat { font-size: 0.72rem; color: var(--muted); letter-spacing: 0.08em; }
 .ef-shift-text strong { color: var(--text); }
 
 /* ═══════════════════════════════════════════════════════════════════════════

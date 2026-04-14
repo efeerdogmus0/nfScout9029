@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import {
-  getEventKey,
-  getCurrentMatchNum, setCurrentMatchNum, getRotationMatchCount,
-  getShiftStatusByUsername, getScoutDisplayName,
-} from "../adminConfig";
+import { getEventKey } from "../adminConfig";
 import { fetchActiveQualification, fetchSchedule } from "../api";
 import { buildQrDataUrl } from "../qr";
 import { getOfflineReports, saveReport } from "../storage";
@@ -346,10 +342,6 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
   const [syncStatus, setSyncStatus] = useState("");
   const [qr,         setQr]         = useState("");
 
-  // Shift / vardiya — match-based
-  const [currentMatchNum,    setCurrentMatchNumSt] = useState(getCurrentMatchNum);
-  const [rotationMatchCount, setRotationMatchCount] = useState(getRotationMatchCount);
-
   const seat          = auth?.seat || "";
   const scoutAlliance = seat.startsWith("red") ? "red" : "blue";
 
@@ -375,8 +367,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
     ? Math.min(4, Math.floor((elapsedMs - TRANSITION_END_MS) / SHIFT_MS) + 1)
     : null;
   const hubState      = computeHubState({ elapsedMs, autoWinner, scoutAlliance });
-  const shiftStatus = auth ? getShiftStatusByUsername(auth.username, currentMatchNum, rotationMatchCount) : null;
-  const scoutName   = auth ? getScoutDisplayName(auth.username) : "";
+  const scoutName = auth?.name || seat.toUpperCase();
 
   // ── Sync event key from admin config ────────────────────────────────────────
   useEffect(() => {
@@ -385,17 +376,6 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
     return () => window.removeEventListener("adminConfigChanged", onCfg);
   }, []);
 
-  // ── Shift / vardiya refresh ───────────────────────────────────────────────
-  useEffect(() => {
-    const onMatch = () => setCurrentMatchNumSt(getCurrentMatchNum());
-    const onCfg   = () => setRotationMatchCount(getRotationMatchCount());
-    window.addEventListener("currentMatchNumChanged", onMatch);
-    window.addEventListener("adminConfigChanged", onCfg);
-    return () => {
-      window.removeEventListener("currentMatchNumChanged", onMatch);
-      window.removeEventListener("adminConfigChanged", onCfg);
-    };
-  }, []);
 
   // ── Load field photo + zones (once on mount, refresh on storage change) ──────
   useEffect(() => {
@@ -551,14 +531,6 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
   // ── Match flow ────────────────────────────────────────────────────────────────
   function startMatch() {
     const now = Date.now();
-    // Save current qual number for match-based shift tracking
-    const qualNum = effectiveMatch?.match_key
-      ? parseInt(effectiveMatch.match_key.split("_qm")[1])
-      : null;
-    if (qualNum && !isNaN(qualNum)) {
-      setCurrentMatchNum(qualNum);
-      setCurrentMatchNumSt(qualNum);
-    }
     resetMatch();
     setMatchPhase("running");
     matchStartRef.current = now;
@@ -748,7 +720,6 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
       schedule={schedule}
       qualNumOverride={qualNumOverride}
       onQualChange={setQualNumOverride}
-      shiftStatus={shiftStatus}
       scoutName={scoutName}
       isRetro={Boolean(initialMatchKey)}
       onStart={startMatch} onLogout={logout} />
@@ -774,12 +745,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
         <span className="ef-timer">{secsLeft}s</span>
         <span className="ef-phase" style={{ color: phaseColor }}>{phaseLabel}</span>
         <span className={`ef-hub ${hubState}`}>HUB {hubState === "active" ? "ON" : "OFF"}</span>
-        <span className="ef-seat">{seat.toUpperCase()}</span>
-        {shiftStatus && (
-          <span className={`ef-shift-badge ${shiftStatus.isActive ? "shift-active" : "shift-break"}`}>
-            {shiftStatus.isActive ? `▶ ${shiftStatus.matchesLeft}m` : `☕ →${shiftStatus.nextChangeAt}`}
-          </span>
-        )}
+        <span className="ef-seat">{scoutName}</span>
       </div>
 
       {/* AUTO WINNER OVERLAY */}
@@ -917,7 +883,7 @@ function DoneScreen({ syncStatus, qr, onNext }) {
 }
 
 function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOverride, onQualChange,
-                        shiftStatus, scoutName, isRetro, onStart, onLogout }) {
+                        scoutName, isRetro, onStart, onLogout }) {
   const qualNum = matchKey ? parseInt(matchKey.split("_qm")[1]) : null;
   const isOverridden = qualNumOverride != null;
   const [inputVal, setInputVal] = useState(qualNum != null ? String(qualNum) : "");
@@ -942,37 +908,11 @@ function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOve
         </div>
       )}
 
-      {/* Shift / vardiya card */}
-      {shiftStatus ? (
-        <div className={`ef-shift-card ${shiftStatus.isActive ? "shift-active" : "shift-break"}`}>
-          {shiftStatus.isActive
-            ? <>
-                <span className="ef-shift-icon">▶</span>
-                <span className="ef-shift-text">
-                  <strong>{scoutName || seat.toUpperCase()}</strong>
-                  {" · aktif · "}<em>{shiftStatus.matchesLeft} maç</em> kaldı
-                  {" · maç "}<strong>{shiftStatus.nextChangeAt}</strong>'de mola
-                </span>
-              </>
-            : <>
-                <span className="ef-shift-icon">☕</span>
-                <span className="ef-shift-text">
-                  <strong>{scoutName || seat.toUpperCase()}</strong>
-                  {" · mola · "}<em>{shiftStatus.matchesLeft} maç</em> sonra dön
-                  {" · maç "}<strong>{shiftStatus.nextChangeAt}</strong>'de aktif
-                </span>
-              </>
-          }
-        </div>
-      ) : (
-        <div className="ef-shift-card shift-unknown">
-          <span className="ef-shift-icon">⏱</span>
-          <span className="ef-shift-text">
-            {scoutName || seat.toUpperCase()}
-            {" · "}vardiya ilk MATCH START'ta otomatik başlar
-          </span>
-        </div>
-      )}
+      {/* Scout identity card */}
+      <div className="ef-scout-card">
+        <span className="ef-scout-name">{scoutName}</span>
+        <span className="ef-scout-seat">{seat.toUpperCase()}</span>
+      </div>
 
       <div className="ef-ready-seat">{seat.toUpperCase()}</div>
       <div className="ef-ready-team">TEAM {teamLabel}</div>

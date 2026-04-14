@@ -2,9 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   getAdminConfig, setAdminConfig,
-  getCurrentMatchNum, setCurrentMatchNum, clearCurrentMatchNum,
-  getFieldCredentials, getPitCredentials, getPitScoutCount,
-  getFullSchedule,
+  getPitCredentials, getPitScoutCount,
   setScoutName, getScoutNames,
 } from "../adminConfig";
 import { fetchEventTeams, fetchSchedule } from "../api";
@@ -21,11 +19,10 @@ const KNOWN_EVENTS = [
 ];
 
 const TABS = [
-  { key: "settings",  label: "⚙️ Ayarlar"     },
-  { key: "rotation",  label: "🔄 Vardiya"      },
-  { key: "pit",       label: "👷 Pit Tayfa"    },
-  { key: "coverage",  label: "📊 Kapsama"      },
-  { key: "calib",     label: "📐 Kalibre"      },
+  { key: "settings", label: "⚙️ Ayarlar"  },
+  { key: "pit",      label: "👷 Pit Tayfa" },
+  { key: "coverage", label: "📊 Kapsama"   },
+  { key: "calib",    label: "📐 Kalibre"   },
 ];
 
 // ─── INLINE NAME EDITOR ───────────────────────────────────────────────────────
@@ -44,15 +41,6 @@ function NameInput({ username, initialName }) {
       onKeyDown={(e) => e.key === "Enter" && save()}
     />
   );
-}
-
-// ─── SHIFT BADGE ─────────────────────────────────────────────────────────────
-function ShiftBadge({ status }) {
-  if (!status || status.isActive === null)
-    return <span className="shift-badge shift-unknown">–</span>;
-  if (status.isActive)
-    return <span className="shift-badge shift-active">▶ {status.matchesLeft}m · →{status.nextChangeAt}</span>;
-  return <span className="shift-badge shift-break">☕ {status.matchesLeft}m · →{status.nextChangeAt}</span>;
 }
 
 // ─── PIT TAB (with missing-team summary) ─────────────────────────────────────
@@ -378,24 +366,16 @@ export default function AdminPanel() {
   const [orSaved,        setOrSaved]        = useState(false);
   const [myTeamInput,  setMyTeamInput] = useState(() => getAdminConfig().myTeam   || "");
   const [tbaSaved, setTbaSaved] = useState(false);
-  const [pitCount,          setPitCount]          = useState(getPitScoutCount);
-  const [currentMatchNum,   setCurrentMatchNumSt] = useState(getCurrentMatchNum);
-  const [rotationMatchCount, setRotationMatchCountSt] = useState(() => getAdminConfig().rotationMatchCount ?? 12);
+  const [pitCount, setPitCount] = useState(getPitScoutCount);
 
   useEffect(() => {
     const onCfg = () => {
       const c = getAdminConfig();
       setConfig(c);
       setPitCount(c.pitScoutCount ?? 2);
-      setRotationMatchCountSt(c.rotationMatchCount ?? 12);
     };
-    const onMatch = () => setCurrentMatchNumSt(getCurrentMatchNum());
     window.addEventListener("adminConfigChanged", onCfg);
-    window.addEventListener("currentMatchNumChanged", onMatch);
-    return () => {
-      window.removeEventListener("adminConfigChanged", onCfg);
-      window.removeEventListener("currentMatchNumChanged", onMatch);
-    };
+    return () => window.removeEventListener("adminConfigChanged", onCfg);
   }, []);
 
   function selectEvent(key) {
@@ -418,24 +398,8 @@ export default function AdminPanel() {
     const cfg = { ...config, pitScoutCount: next };
     setConfig(cfg); setAdminConfig(cfg);
   }
-  function changeRotation(delta) {
-    const next = Math.max(3, Math.min(30, rotationMatchCount + delta));
-    setRotationMatchCountSt(next);
-    const cfg = { ...config, rotationMatchCount: next };
-    setConfig(cfg); setAdminConfig(cfg);
-  }
-  function changeMatchNum(delta) {
-    const base = currentMatchNum ?? 1;
-    const next = Math.max(1, base + delta);
-    setCurrentMatchNumSt(next);
-    setCurrentMatchNum(next);
-  }
-  function resetMatchNum() { clearCurrentMatchNum(); setCurrentMatchNumSt(null); }
-
   const scoutNames = getScoutNames();
-  const fieldCreds = getFieldCredentials();
   const pitCreds   = getPitCredentials();
-  const schedule   = getFullSchedule(currentMatchNum, rotationMatchCount);
 
   return (
     <section className="terminal admin-panel">
@@ -540,79 +504,6 @@ export default function AdminPanel() {
               Takım: <strong>{config.myTeam.startsWith("frc") ? config.myTeam : `frc${config.myTeam}`}</strong>
             </p>
           )}
-        </>
-      )}
-
-      {/* ── ROTATION / VARDIYA ── */}
-      {tab === "rotation" && (
-        <>
-          {/* Controls row */}
-          <div className="admin-rot-controls">
-            <div className="admin-rot-ctrl-block">
-              <p className="admin-section-label">Rotasyon Periyodu (maç)</p>
-              <div className="admin-pit-stepper">
-                <button onClick={() => changeRotation(-1)} disabled={rotationMatchCount <= 3}>−</button>
-                <span className="admin-pit-count">{rotationMatchCount}</span>
-                <button onClick={() => changeRotation(+1)} disabled={rotationMatchCount >= 30}>+</button>
-                <span className="admin-pit-note">maç aktif → {Math.round(rotationMatchCount * 2 / 3)} maç mola</span>
-              </div>
-            </div>
-            <div className="admin-rot-ctrl-block">
-              <p className="admin-section-label">Güncel Maç Numarası</p>
-              <div className="admin-pit-stepper">
-                <button onClick={() => changeMatchNum(-1)} disabled={!currentMatchNum || currentMatchNum <= 1}>−</button>
-                <span className="admin-pit-count">{currentMatchNum ?? "—"}</span>
-                <button onClick={() => changeMatchNum(+1)}>+</button>
-                {currentMatchNum
-                  ? <button className="admin-evtstart-reset" onClick={resetMatchNum} style={{ marginLeft: "0.4rem" }}>Sıfırla</button>
-                  : <span className="admin-pit-note">MATCH START'ta otomatik set edilir</span>
-                }
-              </div>
-            </div>
-          </div>
-
-          {/* Rotation info */}
-          <p className="admin-pit-info" style={{ margin: "0.4rem 0 0.8rem" }}>
-            Her an tam <strong>6 kişi aktif, 4 kişi molada</strong> · 5 grup · döngü = {5 * rotationMatchCount} maç
-          </p>
-
-          {/* Schedule table */}
-          <div className="admin-rotation-table">
-            <div className="admin-rot-head">
-              <span>Grup</span>
-              <span>Hesap</span>
-              <span>İsim</span>
-              <span>Koltuk</span>
-              <span>Durum</span>
-            </div>
-            {schedule.map((s, i) => {
-              const groupLabel = ["A","A","B","B","C","C","D","D","E","E"][i];
-              const isExtra = s.seatIndex >= 6;
-              const displaySeat = isExtra && s.isActive && s.coversSeat
-                ? s.coversSeat
-                : isExtra ? "—" : s.seat;
-              const seatClass = displaySeat.startsWith("red") ? "is-red"
-                              : displaySeat.startsWith("blue") ? "is-blue"
-                              : "is-extra";
-              return (
-                <div key={s.username}
-                  className={`admin-rot-row${s.isActive ? " rot-active" : s.isActive === false ? " rot-break" : ""}`}>
-                  <span className="admin-rot-group">{groupLabel}</span>
-                  <span className="admin-rot-user">{s.username}</span>
-                  <NameInput username={s.username} initialName={scoutNames[s.username] || ""} />
-                  <span className={`admin-rot-seat ${seatClass}`}>
-                    {isExtra && s.isActive && s.coversSeat
-                      ? <>→ {displaySeat.toUpperCase()}</>
-                      : displaySeat.toUpperCase()}
-                  </span>
-                  <ShiftBadge status={s} />
-                </div>
-              );
-            })}
-          </div>
-          <p className="admin-pit-info" style={{ marginTop: "0.6rem" }}>
-            D/E grubu (seat7-10) aktifken üstteki tablodaki <strong>koltuk sütunu</strong> hangi fiziksel koltuğa oturacaklarını gösterir.
-          </p>
         </>
       )}
 

@@ -4,12 +4,14 @@ import AdminPanel        from "./components/AdminPanel";
 import WarRoomDashboard  from "./components/WarRoomDashboard";
 import TestDataPanel     from "./components/TestDataPanel";
 import UserManual        from "./components/UserManual";
-import EyesFreeTerminal from "./components/EyesFreeTerminal";
-import PitScoutPanel    from "./components/PitScoutPanel";
-import VideoScoutPanel  from "./components/VideoScoutPanel";
+import EyesFreeTerminal  from "./components/EyesFreeTerminal";
+import PitScoutPanel     from "./components/PitScoutPanel";
+import VideoScoutPanel   from "./components/VideoScoutPanel";
 import {
-  validateLogin, getScoutDisplayName,
-  getFieldCredentials, getPitCredentials, getVideoCredentials, getAdminCredential,
+  validateLogin,
+  getPitCredentials, getVideoCredentials, getAdminCredential,
+  FIELD_SEATS, getSeatAssignments, isFreshSeat,
+  getNextAvailableSeat, claimSeat, releaseSeat,
 } from "./adminConfig";
 import { getOfflineReports } from "./storage";
 import { syncReportsIfOnline } from "./sync";
@@ -23,27 +25,62 @@ function getStoredAuth() {
 
 // Default panel each role lands on after login
 const ROLE_DEFAULT = {
-  field_scout:  "eyes",
-  pit_scout:    "pit",
-  video_scout:  "video",
-  admin:        "eyes",
+  field_scout: "eyes",
+  pit_scout:   "pit",
+  video_scout: "video",
+  admin:       "eyes",
 };
 
 // Nav tabs — adminOnly ones are hidden from non-admin users
 const TABS = [
-  { key: "eyes",    label: "🕹 Saha",      adminOnly: false },
-  { key: "pit",     label: "🔍 Pit",       adminOnly: false },
-  { key: "video",   label: "🎬 Video",     adminOnly: false },
-  { key: "warroom", label: "⚡ War Room",  adminOnly: true  },
-  { key: "admin",   label: "⚙️ Admin",    adminOnly: true  },
-  { key: "test",    label: "🧪 Test",     adminOnly: true  },
-  { key: "manual",  label: "📖 Kılavuz",  adminOnly: false },
+  { key: "eyes",    label: "🕹 Saha",     adminOnly: false },
+  { key: "pit",     label: "🔍 Pit",      adminOnly: false },
+  { key: "video",   label: "🎬 Video",    adminOnly: false },
+  { key: "warroom", label: "⚡ War Room", adminOnly: true  },
+  { key: "admin",   label: "⚙️ Admin",   adminOnly: true  },
+  { key: "test",    label: "🧪 Test",    adminOnly: true  },
+  { key: "manual",  label: "📖 Kılavuz", adminOnly: false },
 ];
 
 const DEVICE_ID = `app-${Math.random().toString(36).slice(2, 8)}`;
 
+// Human-readable seat labels
+const SEAT_LABEL = {
+  red1: "R1", red2: "R2", red3: "R3",
+  blue1: "M1", blue2: "M2", blue3: "M3",
+};
+
 // ─── UNIFIED LOGIN SCREEN ─────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
+  // ── Field scout state ──
+  const [fieldName,    setFieldName]    = useState("");
+  const [selectedSeat, setSelectedSeat] = useState(null);
+  const [assignments,  setAssignments]  = useState(getSeatAssignments);
+
+  // Auto-suggest next free seat on first render
+  useEffect(() => {
+    setSelectedSeat(getNextAvailableSeat());
+  }, []);
+
+  // Refresh assignments when this component mounts (other devices may have claimed)
+  useEffect(() => {
+    setAssignments(getSeatAssignments());
+  }, []);
+
+  function fieldLogin() {
+    const name = fieldName.trim();
+    if (!name || !selectedSeat) return;
+    claimSeat(selectedSeat, name);
+    onLogin({
+      username:  selectedSeat,
+      seat:      selectedSeat,
+      role:      "field_scout",
+      name,
+      seatIndex: FIELD_SEATS.indexOf(selectedSeat),
+    });
+  }
+
+  // ── Pit / Video / Admin state ──
   const [username, setUsername] = useState("");
   const [pin,      setPin]      = useState("");
   const [err,      setErr]      = useState("");
@@ -51,12 +88,14 @@ function LoginScreen({ onLogin }) {
 
   function attempt(u, p) {
     const cred = validateLogin(u ?? username, p ?? pin);
-    if (cred) { onLogin(cred); }
-    else { setErr("Hatalı kullanıcı adı veya PIN."); setPin(""); }
+    if (cred) {
+      onLogin({ ...cred, name: cred.username });
+    } else {
+      setErr("Hatalı kullanıcı adı veya PIN.");
+      setPin("");
+    }
   }
 
-  // Quick-login button groups
-  const fieldCreds = getFieldCredentials();
   const pitCreds   = getPitCredentials();
   const videoCreds = getVideoCredentials();
   const adminCred  = getAdminCredential();
@@ -69,28 +108,52 @@ function LoginScreen({ onLogin }) {
       <h2 className="app-login-title">REBUILT SCOUTING</h2>
       <p className="app-login-sub">2026 · Team NF</p>
 
-      {/* ── Saha Tayfa ── */}
+      {/* ── Saha Tayfa — ad + koltuk ── */}
       <p className="app-login-group-label">🕹 Saha Tayfa</p>
-      <div className="app-quick-grid app-quick-grid--field">
-        {fieldCreds.slice(0, 6).map((c) => {
-          const isRed = c.seat.startsWith("red");
-          return (
-            <button key={c.username}
-              className={`app-quick-btn ${isRed ? "qbtn-red" : "qbtn-blue"}`}
-              onClick={() => attempt(c.username, c.pin)}>
-              {c.seat.replace("red","R").replace("blue","B").toUpperCase()}
-            </button>
-          );
-        })}
-        {fieldCreds.slice(6).map((c) => (
-          <button key={c.username} className="app-quick-btn qbtn-extra"
-            onClick={() => attempt(c.username, c.pin)}>
-            {c.seat.replace("seat","S-").toUpperCase()}
-          </button>
-        ))}
+      <div className="app-field-login">
+        <input
+          className="app-field-name-input"
+          placeholder="Adın..."
+          value={fieldName}
+          autoComplete="off"
+          autoCapitalize="words"
+          onChange={(e) => setFieldName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && fieldLogin()}
+        />
+
+        <div className="app-seat-grid">
+          {FIELD_SEATS.map((seat) => {
+            const asgn    = assignments[seat];
+            const isTaken = isFreshSeat(asgn);
+            const isSel   = selectedSeat === seat;
+            const isRed   = seat.startsWith("red");
+            return (
+              <button
+                key={seat}
+                className={`app-seat-btn${isRed ? " seat-red" : " seat-blue"}${isSel ? " seat-selected" : ""}${isTaken && !isSel ? " seat-taken" : ""}`}
+                onClick={() => setSelectedSeat(isSel ? null : seat)}
+                title={isTaken && !isSel ? `${asgn.name} bu koltuğu kullanıyor` : seat}
+              >
+                <span className="seat-label">{SEAT_LABEL[seat]}</span>
+                {isTaken && !isSel
+                  ? <span className="seat-occupant">{asgn.name}</span>
+                  : <span className="seat-pos">{seat.replace("red", "RED ").replace("blue", "BLUE ")}</span>
+                }
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          className="app-field-go-btn"
+          disabled={!fieldName.trim() || !selectedSeat}
+          onClick={fieldLogin}
+        >
+          SAHA'YA GİR →
+        </button>
       </div>
 
-      {/* ── Pit + Video ── */}
+      {/* ── Pit + Video + Admin ── */}
       <div className="app-quick-row">
         <div>
           <p className="app-login-group-label">🔍 Pit Tayfa</p>
@@ -125,8 +188,8 @@ function LoginScreen({ onLogin }) {
         </div>
       </div>
 
-      {/* ── Manuel giriş ── */}
-      <div className="app-login-divider">veya manuel gir</div>
+      {/* ── Manuel PIN girişi (pit/video/admin) ── */}
+      <div className="app-login-divider">pit / video / admin manuel giriş</div>
       <div className="app-login-manual">
         <input ref={inputRef} placeholder="Kullanıcı adı" value={username}
           autoCapitalize="none" autoComplete="username"
@@ -146,14 +209,14 @@ function LoginScreen({ onLogin }) {
 
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [auth,       setAuth]       = useState(getStoredAuth);
-  const [mode,       setMode]       = useState(() => {
+  const [auth,          setAuth]          = useState(getStoredAuth);
+  const [mode,          setMode]          = useState(() => {
     const a = getStoredAuth();
     return a ? (ROLE_DEFAULT[a.role] || "eyes") : "eyes";
   });
-  const [syncToast,    setSyncToast]    = useState("");
-  const [showImport,   setShowImport]   = useState(false);
-  const [retroMatchKey, setRetroMatchKey] = useState(null); // for retroactive scouting
+  const [syncToast,     setSyncToast]     = useState("");
+  const [showImport,    setShowImport]    = useState(false);
+  const [retroMatchKey, setRetroMatchKey] = useState(null);
 
   // Launch retroactive scouting from Admin Coverage panel
   useEffect(() => {
@@ -167,7 +230,7 @@ export default function App() {
     return () => window.removeEventListener("launchRetroScout", handle);
   }, []);
 
-  // Clear retroMatchKey when leaving eyes mode so next visit starts fresh
+  // Clear retroMatchKey when leaving eyes mode
   const prevModeRef = useRef(mode);
   useEffect(() => {
     if (prevModeRef.current === "eyes" && mode !== "eyes") setRetroMatchKey(null);
@@ -191,10 +254,10 @@ export default function App() {
 
   function login(cred) {
     const a = {
-      username: cred.username,
-      seat:     cred.seat,
-      role:     cred.role,
-      name:     getScoutDisplayName(cred.username),
+      username:  cred.username,
+      seat:      cred.seat,
+      role:      cred.role,
+      name:      cred.name || cred.username,
       seatIndex: cred.seatIndex ?? -1,
     };
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(a));
@@ -203,14 +266,18 @@ export default function App() {
   }
 
   function logout() {
+    // Release field scout seat reservation
+    if (auth?.role === "field_scout" && auth?.seat) {
+      releaseSeat(auth.seat);
+    }
     sessionStorage.removeItem(SESSION_KEY);
     setAuth(null);
   }
 
   if (!auth) return <LoginScreen onLogin={login} />;
 
-  const isAdmin    = auth.role === "admin";
-  const visibleTabs = TABS.filter(t => !t.adminOnly || isAdmin);
+  const isAdmin     = auth.role === "admin";
+  const visibleTabs = TABS.filter((t) => !t.adminOnly || isAdmin);
 
   return (
     <>
