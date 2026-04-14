@@ -14,7 +14,7 @@ import {
   analyzeTeam, getCardInsights,
   detectAutoCollisions, findOpponentCarrier, findChokePoint,
   analyzeTrafficRouting, getReliabilityRoles, analyzeShootingPositions,
-  ZONE_LABEL,
+  computeSoS, ZONE_LABEL,
 } from "../teamAnalytics";
 import TeamProfileModal from "./TeamProfileModal";
 
@@ -271,15 +271,25 @@ function MultiPathOverlay({ match, scoutReports }) {
     }
   }, [fieldImg, teamPaths]);
 
-  // Try backend overlay for conflict notes
+  // Try backend overlay for collision warnings
+  // Schema: { match_key, paths: [{ robot: string, points: [{x,y,t_ms?}] }] }
+  // Response: { match_key, warnings: [{ robot_a, robot_b, t_ms, x, y }] }
   useEffect(() => {
     if (!Object.keys(teamPaths).length) return;
     const paths = Object.entries(teamPaths).map(([tk, pts]) => ({
-      team_key: tk, auto_path_points: pts,
-      alliance: match.red.includes(tk) ? "red" : "blue",
+      robot:  tk,
+      points: pts.map(p => ({ x: p.x, y: p.y, ...(p.t_ms != null ? { t_ms: p.t_ms } : {}) })),
     }));
     runOverlay({ match_key: match.match_key, paths })
-      .then(r => { if (r.note) setOverlayNote(r.note); })
+      .then(r => {
+        const w = r.warnings || [];
+        if (w.length) {
+          const msg = w.map(c =>
+            `${teamNum(c.robot_a)} ↔ ${teamNum(c.robot_b)} yakın geçiş (t=${(c.t_ms/1000).toFixed(1)}s)`
+          ).join(" · ");
+          setOverlayNote(msg);
+        }
+      })
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [match.match_key, teamPaths]);
@@ -671,8 +681,81 @@ function WinProbWidget({ match, myTeam, epaData }) {
   );
 }
 
+// ─── SCHEDULE STRENGTH WIDGET ────────────────────────────────────────────────
+/**
+ * Shows per-team SoS for all 6 robots in the selected match.
+ * - EPA: raw Statbotics score
+ * - SoS: avg EPA of opponents faced so far
+ * - Adj. EPA: EPA × (SoS / event avg) — corrected for schedule difficulty
+ * - Tier badge: Zorlu / Normal / Kolay
+ */
+function ScheduleStrengthWidget({ match, schedule, epaData }) {
+  const hasEpa = Object.keys(epaData).length > 0;
+  if (!hasEpa) return null;
+
+  const rows = [
+    ...match.red.map((tk) => ({ tk, alliance: "red" })),
+    ...match.blue.map((tk) => ({ tk, alliance: "blue" })),
+  ].map(({ tk, alliance }) => {
+    const epa = epaData[tk]?.epa ?? null;
+    const { sos, matchCount, tier, adjEpa } = computeSoS(tk, schedule, epaData);
+    return { tk, alliance, epa, sos, matchCount, tier, adjEpa };
+  });
+
+  const TIER_LABEL = { hard: "⬆ Zorlu", normal: "Normal", easy: "⬇ Kolay" };
+
+  return (
+    <div className="wr-sos-widget">
+      <div className="wr-sos-title">📅 Program Zorluğu (SoS)</div>
+      <table className="wr-sos-table">
+        <thead>
+          <tr>
+            <th>Takım</th>
+            <th title="Statbotics EPA">EPA</th>
+            <th title="Oynanan maçlardaki ortalama rakip EPA">SoS</th>
+            <th title="EPA × (SoS / etkinlik ort.) — program zorluğuna göre düzeltilmiş">Düz. EPA</th>
+            <th>Program</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ tk, alliance, epa, sos, matchCount, tier, adjEpa }) => (
+            <tr key={tk} className={`wr-sos-row wr-sos-${alliance}`}>
+              <td className="wr-sos-team">{teamNum(tk)}</td>
+              <td className="wr-sos-epa">{epa ?? "—"}</td>
+              <td className="wr-sos-sos">
+                {sos != null ? sos : "—"}
+                {matchCount > 0 && <span className="wr-sos-mc"> ({matchCount}m)</span>}
+              </td>
+              <td className={`wr-sos-adj${
+                adjEpa == null || epa == null ? "" :
+                adjEpa > epa ? " wr-sos-up" : adjEpa < epa ? " wr-sos-down" : ""
+              }`}>
+                {adjEpa ?? "—"}
+                {adjEpa != null && epa != null && adjEpa !== epa && (
+                  <span className="wr-sos-delta">
+                    {adjEpa > epa ? ` (+${(adjEpa - epa).toFixed(1)})` : ` (${(adjEpa - epa).toFixed(1)})`}
+                  </span>
+                )}
+              </td>
+              <td>
+                <span className={`wr-sos-tier wr-sos-tier-${tier}`}>
+                  {TIER_LABEL[tier]}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="wr-sos-note">
+        SoS = oynanan maçlardaki rakip takımların ort. EPA'sı · Düz. EPA = EPA × (SoS / etkinlik ort.)
+        — kolay program üstünlüğünü kompanse eder, gerçek güç karşılaştırması için kullanın.
+      </p>
+    </div>
+  );
+}
+
 // ─── MATCH ANALYSIS PANEL ────────────────────────────────────────────────────
-function MatchAnalysisPanel({ match, myTeam, pitReports, scoutReports, epaData }) {
+function MatchAnalysisPanel({ match, myTeam, pitReports, scoutReports, epaData, schedule }) {
   const myAlliance   = myTeam
     ? match.red.includes(myTeam) ? "red" : match.blue.includes(myTeam) ? "blue" : null
     : null;
@@ -732,6 +815,38 @@ function MatchAnalysisPanel({ match, myTeam, pitReports, scoutReports, epaData }
       body:  `${stronger} alliance EPA üstün — fark ${Math.abs(diff).toFixed(1)}.\nBizim: ${ourStr} (ort. ${ourAvgEpa.toFixed(1)})\nRakip: ${enemyStr} (ort. ${enemyAvgEpa.toFixed(1)})`,
       kind:  diff >= 0 ? "good" : "warn",
     });
+  }
+
+  // SoS inflation warning: opponents with high EPA but easy schedule
+  if (schedule?.length && Object.keys(epaData).length) {
+    const allEpas = Object.values(epaData).map((d) => d.epa).filter((e) => e != null);
+    const avgEpa  = allEpas.length ? allEpas.reduce((a, b) => a + b, 0) / allEpas.length : null;
+
+    const inflated = enemyTeams.filter((tk) => {
+      const { tier } = computeSoS(tk, schedule, epaData);
+      return tier === "easy" && (epaData[tk]?.epa ?? 0) > (avgEpa ?? 0);
+    });
+    const underrated = ourTeams.filter((tk) => {
+      const { tier } = computeSoS(tk, schedule, epaData);
+      return tier === "hard" && (epaData[tk]?.epa ?? 0) < (avgEpa ?? 0);
+    });
+
+    if (inflated.length) {
+      cards.push({
+        icon:  "📅",
+        title: "Rakip EPA Şişirilmiş Olabilir",
+        body:  `${inflated.map((tk) => `frc${teamNum(tk)}`).join(", ")} yüksek EPA'sına rağmen kolay program oynamış — gerçek güçleri daha düşük olabilir. Baskı altında sınanmamış olabilirler.`,
+        kind:  "info",
+      });
+    }
+    if (underrated.length) {
+      cards.push({
+        icon:  "💎",
+        title: "Bizim Takım Değer Altında",
+        body:  `${underrated.map((tk) => `frc${teamNum(tk)}`).join(", ")} düşük EPA'sına rağmen zorlu bir program geçirmiş — kağıtta göründüğünden daha güçlü olabilir.`,
+        kind:  "good",
+      });
+    }
   }
 
   // Auto collision risks
@@ -923,6 +1038,137 @@ function MatchRow({ match, myTeam, selected, onClick }) {
   );
 }
 
+// ─── PRINT PREVIEW (opens new window → window.print()) ───────────────────────
+function escHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function buildPrintHTML({ match, pitReports, scoutReports, epaData, schedule, aiText, strategyText, myTeam }) {
+  const eventKey   = match.match_key.split("_qm")[0];
+  const qNum       = match.match_key.split("_qm")[1];
+  const now        = new Date().toLocaleString("tr-TR");
+  const myAlliance = myTeam
+    ? match.red.includes(myTeam) ? "red" : match.blue.includes(myTeam) ? "blue" : null
+    : null;
+
+  const TIER_LABEL = { hard: "⬆ Zorlu", normal: "Normal", easy: "⬇ Kolay" };
+  const INSP_LABEL = { passed: "✓ Geçti", failed: "✗ Kaldı", pending: "⏳ Bekliyor" };
+
+  function teamCard(tk, alliance) {
+    const pit      = pitReports[tk] || {};
+    const analysis = analyzeTeam(tk, scoutReports);
+    const { sos, tier, adjEpa } = computeSoS(tk, schedule, epaData);
+    const epaEntry = epaData[tk];
+    const isOurs   = tk === myTeam;
+    const num      = tk.replace("frc", "");
+
+    const fields = [
+      ["Sürüş",       [pit.drive, pit.driveMotor].filter(Boolean).join(" ") || null],
+      ["Swerve",      pit.swerveModel ? `${pit.swerveModel}${pit.swerveTorque ? ` ${pit.swerveTorque}` : ""}` : null],
+      ["Limelight",   pit.limelightCount ? `${pit.limelightCount}× ${pit.limelightModel || ""}`.trim() : null],
+      ["Tırmanma T.", pit.climbTeleop || null],
+      ["Tırmanma O.", pit.climbAuto   || null],
+      ["Atış Menzili",pit.shootRange  || null],
+      ["Defans",      pit.defense     || null],
+      ["Taşıyıcı",   pit.carrierCap  ? `${pit.carrierCap} top` : null],
+      ["Güvenilirlik",pit.consistency || null],
+      ["EPA",         epaEntry ? `${epaEntry.epa}${epaEntry.rank ? ` · #${epaEntry.rank}` : ""}${epaEntry.winrate != null ? ` · %${epaEntry.winrate}W` : ""}` : null],
+      ["SoS",         sos != null ? `${sos} (${TIER_LABEL[tier]})` : null],
+      ["Düz. EPA",    adjEpa != null ? String(adjEpa) : null],
+      ["Scout (n)",   analysis ? `${analysis.n}m · ort.${analysis.avgFuelTotal}F · ${analysis.scoreConsistency}` : null],
+      ["İnsp. Ağır.", pit.inspectionWeight ? `${pit.inspectionWeight} kg` : null],
+      ["İnspeksiyon", pit.inspectionStatus ? INSP_LABEL[pit.inspectionStatus] || pit.inspectionStatus : null],
+    ].filter(([, v]) => v != null && v !== "");
+
+    const problems = analysis?.topProblems?.length
+      ? analysis.topProblems.map((p) => `${p.type.toUpperCase()}(%${p.pct})`).join(", ")
+      : null;
+
+    const climb = analysis?.climbSummary;
+    const climbStr = climb?.attempts
+      ? `%${Math.round(climb.attempts / climb.n * 100)} · ${climb.l3 ? "L3" : climb.l2 ? "L2" : "L1"}`
+      : null;
+
+    const allNotes = [pit.notes, pit.inspectionNotes, pit.interviewNotes].filter(Boolean);
+
+    const border = alliance === "red" ? "#ef4444" : "#3b82f6";
+
+    return `
+      <div style="border:0.75pt solid #ccc;border-left:3pt solid ${border};border-radius:2mm;padding:2mm 3mm;margin-bottom:2mm;page-break-inside:avoid;">
+        <div style="display:flex;align-items:baseline;gap:3mm;margin-bottom:1.5mm;">
+          <span style="font-size:12pt;font-weight:bold;">${isOurs ? "★ " : ""}frc${escHtml(num)}</span>
+          ${pit.consistency ? `<span style="font-size:7.5pt;color:#555;">${escHtml(pit.consistency)}</span>` : ""}
+          ${climbStr        ? `<span style="font-size:7.5pt;color:#666;">Tır: ${escHtml(climbStr)}</span>` : ""}
+          ${problems        ? `<span style="font-size:7.5pt;color:#b91c1c;">⚠ ${escHtml(problems)}</span>` : ""}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 4mm;font-size:8pt;">
+          ${fields.map(([l, v]) => `
+            <div style="display:flex;gap:1mm;line-height:1.6;">
+              <span style="color:#666;min-width:22mm;flex-shrink:0;">${escHtml(l)}:</span>
+              <span style="font-weight:600;">${escHtml(v)}</span>
+            </div>`).join("")}
+        </div>
+        ${allNotes.length ? `<div style="font-size:7.5pt;color:#444;font-style:italic;margin-top:1.5mm;border-top:0.5pt solid #e5e5e5;padding-top:1mm;">${allNotes.map((n) => `"${escHtml(n)}"`).join(" · ")}</div>` : ""}
+      </div>`;
+  }
+
+  const aiHtml = aiText
+    ? escHtml(aiText)
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/\n/g, "<br>")
+    : null;
+
+  return `<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>Maç Önizleme — ${escHtml(match.match_key)}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, Helvetica, sans-serif; font-size: 9.5pt; margin: 0; padding: 8mm 10mm; background: white; color: #111; }
+    @media print { @page { size: A4; margin: 8mm 10mm; } body { padding: 0; } }
+  </style>
+</head>
+<body>
+  <!-- HEADER -->
+  <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1.5pt solid #000;margin-bottom:4mm;padding-bottom:2mm;">
+    <div>
+      <div style="font-size:13pt;font-weight:bold;margin:0;">📋 Maç Önizleme — Q${escHtml(qNum)}</div>
+      <div style="font-size:8.5pt;color:#555;margin-top:0.5mm;">${escHtml(eventKey)}${myAlliance ? ` · ${myAlliance === "red" ? "🔴 RED ALLIANCEMIZ" : "🔵 BLUE ALLIANCEMIZ"}` : ""}</div>
+    </div>
+    <div style="font-size:8pt;color:#666;text-align:right;">Yazdırma: ${escHtml(now)}<br>FRC Scouting App</div>
+  </div>
+
+  <!-- ALLIANCES -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:4mm;">
+    <div>
+      <span style="font-size:10.5pt;font-weight:bold;background:#fee2e2;color:#991b1b;padding:1mm 2.5mm;border-radius:2mm;display:inline-block;margin-bottom:2mm;">🔴 RED ALLIANCE</span>
+      ${match.red.map((tk) => teamCard(tk, "red")).join("")}
+    </div>
+    <div>
+      <span style="font-size:10.5pt;font-weight:bold;background:#dbeafe;color:#1e3a8a;padding:1mm 2.5mm;border-radius:2mm;display:inline-block;margin-bottom:2mm;">🔵 BLUE ALLIANCE</span>
+      ${match.blue.map((tk) => teamCard(tk, "blue")).join("")}
+    </div>
+  </div>
+
+  ${strategyText ? `
+  <div style="margin-top:5mm;border-top:1pt solid #555;padding-top:2.5mm;page-break-inside:avoid;">
+    <div style="font-size:10pt;font-weight:bold;margin-bottom:1.5mm;">📋 Strateji Notları</div>
+    <div style="font-size:8.5pt;white-space:pre-wrap;line-height:1.5;">${escHtml(strategyText)}</div>
+  </div>` : ""}
+
+  ${aiHtml ? `
+  <div style="margin-top:5mm;border-top:1pt solid #555;padding-top:2.5mm;">
+    <div style="font-size:10pt;font-weight:bold;margin-bottom:1.5mm;">🤖 AI Strateji Analizi</div>
+    <div style="font-size:8pt;line-height:1.45;">${aiHtml}</div>
+  </div>` : ""}
+</body>
+</html>`;
+}
+
 // ─── MAIN ────────────────────────────────────────────────────────────────────
 export default function WarRoomDashboard() {
   const [eventKey,    setEventKey]    = useState(getEventKey);
@@ -1035,6 +1281,26 @@ export default function WarRoomDashboard() {
     saveStrategies(next);
   }
 
+  function handlePrint() {
+    if (!selMatch) return;
+    const html = buildPrintHTML({
+      match:         selMatch,
+      pitReports,
+      scoutReports:  scoutReps,
+      epaData,
+      schedule,
+      aiText:        aiCache[selMatch.match_key] || null,
+      strategyText:  strategies[selMatch.match_key] || null,
+      myTeam,
+    });
+    const win = window.open("", "_blank", "width=900,height=700");
+    if (!win) return;
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 400);
+  }
+
   return (
     <>
     <div className="wr-root">
@@ -1087,6 +1353,9 @@ export default function WarRoomDashboard() {
               <span className="wr-match-key">{selMatch.match_key}</span>
               {myTeam && selMatch.red.includes(myTeam)  && <span className="wr-alliance-badge wr-badge-red">RED ALLIANCEMIZ</span>}
               {myTeam && selMatch.blue.includes(myTeam) && <span className="wr-alliance-badge wr-badge-blue">BLUE ALLIANCEMIZ</span>}
+              <button className="wr-print-btn" onClick={handlePrint} title="Maç önizlemesini yazdır / PDF kaydet">
+                🖨 Yazdır
+              </button>
             </div>
 
             {/* ── RESULT SCOREBOARD (shown for played matches) ── */}
@@ -1117,6 +1386,9 @@ export default function WarRoomDashboard() {
             {/* ── WIN PROBABILITY ── */}
             <WinProbWidget match={selMatch} myTeam={myTeam} epaData={epaData} />
 
+            {/* ── SCHEDULE STRENGTH ── */}
+            <ScheduleStrengthWidget match={selMatch} schedule={schedule} epaData={epaData} />
+
             {/* ── MATCH ANALYSIS PANEL ── */}
             <MatchAnalysisPanel
               match={selMatch}
@@ -1124,6 +1396,7 @@ export default function WarRoomDashboard() {
               pitReports={pitReports}
               scoutReports={scoutReps}
               epaData={epaData}
+              schedule={schedule}
             />
 
             {/* Live hub state (only when match is on) */}

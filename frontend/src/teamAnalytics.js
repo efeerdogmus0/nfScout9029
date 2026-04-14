@@ -622,6 +622,73 @@ export function analyzeShootingPositions(teamKey, pitReport, allReports) {
   };
 }
 
+// ─── SCHEDULE STRENGTH (SoS) ─────────────────────────────────────────────────
+/**
+ * Computes Strength of Schedule for a team at an event.
+ *
+ * Algorithm:
+ *   For every *played* match the team was part of, collect the EPA values of
+ *   all opponents (3 robots from the other alliance).  Average across all
+ *   collected values → SoS.
+ *
+ * Interpretation:
+ *   SoS > eventAvgEpa × 1.12  → "hard"  (tough schedule, EPA may be under-rated)
+ *   SoS < eventAvgEpa × 0.88  → "easy"  (easy schedule, EPA may be over-rated)
+ *   otherwise                 → "normal"
+ *
+ * adjEpa = teamEpa × (sos / eventAvgEpa)
+ *   Normalises EPA relative to difficulty so teams from different schedule
+ *   difficulties can be compared on equal footing.
+ *
+ * @param {string}   teamKey   e.g. "frc1234"
+ * @param {Array}    schedule  full qual schedule array (with red_score / blue_score)
+ * @param {Object}   epaData   { [teamKey]: { epa, ... } }
+ * @returns {{ sos, matchCount, tier, avgEventEpa, adjEpa }}
+ */
+export function computeSoS(teamKey, schedule, epaData) {
+  const played = schedule.filter(
+    (m) =>
+      (m.red_score != null || m.blue_score != null) &&
+      (m.red.includes(teamKey) || m.blue.includes(teamKey))
+  );
+
+  if (!played.length) return { sos: null, matchCount: 0, tier: "normal", avgEventEpa: null, adjEpa: null };
+
+  const oppEpas = [];
+  for (const m of played) {
+    const opps = m.red.includes(teamKey) ? m.blue : m.red;
+    for (const opp of opps) {
+      const e = epaData[opp]?.epa;
+      if (e != null) oppEpas.push(e);
+    }
+  }
+
+  if (!oppEpas.length) return { sos: null, matchCount: played.length, tier: "normal", avgEventEpa: null, adjEpa: null };
+
+  const sos = oppEpas.reduce((a, b) => a + b, 0) / oppEpas.length;
+
+  const allEpas = Object.values(epaData).map((d) => d.epa).filter((e) => e != null);
+  const avgEventEpa = allEpas.length
+    ? allEpas.reduce((a, b) => a + b, 0) / allEpas.length
+    : null;
+
+  const ratio = avgEventEpa ? sos / avgEventEpa : 1;
+  const tier  = ratio >= 1.12 ? "hard" : ratio <= 0.88 ? "easy" : "normal";
+
+  const teamEpa = epaData[teamKey]?.epa ?? null;
+  const adjEpa  = teamEpa != null && avgEventEpa
+    ? +(teamEpa * (sos / avgEventEpa)).toFixed(1)
+    : null;
+
+  return {
+    sos:         +sos.toFixed(1),
+    matchCount:  played.length,
+    tier,
+    avgEventEpa: avgEventEpa ? +avgEventEpa.toFixed(1) : null,
+    adjEpa,
+  };
+}
+
 // ─── FORMAT FOR AI PROMPT ────────────────────────────────────────────────────
 export function formatInsightsForPrompt(teamKey, a) {
   if (!a) return `${teamKey}: Yeterli saha verisi yok.`;

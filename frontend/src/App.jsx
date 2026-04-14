@@ -151,8 +151,28 @@ export default function App() {
     const a = getStoredAuth();
     return a ? (ROLE_DEFAULT[a.role] || "eyes") : "eyes";
   });
-  const [syncToast,  setSyncToast]  = useState("");
-  const [showImport, setShowImport] = useState(false);
+  const [syncToast,    setSyncToast]    = useState("");
+  const [showImport,   setShowImport]   = useState(false);
+  const [retroMatchKey, setRetroMatchKey] = useState(null); // for retroactive scouting
+
+  // Launch retroactive scouting from Admin Coverage panel
+  useEffect(() => {
+    const handle = (e) => {
+      const { matchKey } = e.detail || {};
+      if (!matchKey) return;
+      setRetroMatchKey(matchKey);
+      setMode("eyes");
+    };
+    window.addEventListener("launchRetroScout", handle);
+    return () => window.removeEventListener("launchRetroScout", handle);
+  }, []);
+
+  // Clear retroMatchKey when leaving eyes mode so next visit starts fresh
+  const prevModeRef = useRef(mode);
+  useEffect(() => {
+    if (prevModeRef.current === "eyes" && mode !== "eyes") setRetroMatchKey(null);
+    prevModeRef.current = mode;
+  }, [mode]);
 
   // Auto-sync offline reports when network is restored
   useEffect(() => {
@@ -210,7 +230,9 @@ export default function App() {
         <button className="app-nav-logout" onClick={logout} title="Çıkış yap">⏻</button>
       </nav>
 
-      {mode === "eyes"    && <EyesFreeTerminal auth={auth} onLogout={logout} />}
+      {mode === "eyes"    && <EyesFreeTerminal auth={auth} onLogout={logout}
+                               initialMatchKey={retroMatchKey}
+                               key={retroMatchKey || "default"} />}
       {mode === "pit"     && <PitScoutPanel    auth={auth} onLogout={logout} />}
       {mode === "video"   && <VideoScoutPanel />}
       {mode === "warroom" && <WarRoomDashboard />}

@@ -288,7 +288,7 @@ const TRAVERSALS = [
 ];
 
 // ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
-export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
+export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, initialMatchKey }) {
   const canvasRef      = useRef(null);
   const wrapRef        = useRef(null);
   const matchStartRef  = useRef(null);
@@ -509,6 +509,13 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
     const id = setInterval(pull, 30_000);
     return () => clearInterval(id);
   }, [eventKey, seat]);
+
+  // ── Retroactive match pre-selection from Admin Coverage panel ────────────────
+  useEffect(() => {
+    if (!initialMatchKey) return;
+    const qn = parseInt(initialMatchKey.split("_qm")[1]);
+    if (!isNaN(qn)) setQualNumOverride(qn);
+  }, [initialMatchKey]);
 
   // ── Canvas redraw ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -743,6 +750,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate }) {
       onQualChange={setQualNumOverride}
       shiftStatus={shiftStatus}
       scoutName={scoutName}
+      isRetro={Boolean(initialMatchKey)}
       onStart={startMatch} onLogout={logout} />
   );
 
@@ -909,7 +917,7 @@ function DoneScreen({ syncStatus, qr, onNext }) {
 }
 
 function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOverride, onQualChange,
-                        shiftStatus, scoutName, onStart, onLogout }) {
+                        shiftStatus, scoutName, isRetro, onStart, onLogout }) {
   const qualNum = matchKey ? parseInt(matchKey.split("_qm")[1]) : null;
   const isOverridden = qualNumOverride != null;
   const [inputVal, setInputVal] = useState(qualNum != null ? String(qualNum) : "");
@@ -927,6 +935,13 @@ function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOve
 
   return (
     <div className="ef-ready">
+      {/* Retroactive mode banner */}
+      {isRetro && (
+        <div className="ef-retro-banner">
+          🔁 Geriye Dönük Scouting — Admin panelinden seçildi. Maç numarasını doğrula ve başla.
+        </div>
+      )}
+
       {/* Shift / vardiya card */}
       {shiftStatus ? (
         <div className={`ef-shift-card ${shiftStatus.isActive ? "shift-active" : "shift-break"}`}>

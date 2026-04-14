@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   getAdminConfig, setAdminConfig,
@@ -7,7 +7,8 @@ import {
   getFullSchedule,
   setScoutName, getScoutNames,
 } from "../adminConfig";
-import { fetchEventTeams } from "../api";
+import { fetchEventTeams, fetchSchedule } from "../api";
+import { getOfflineReports } from "../storage";
 import FieldSetupTool from "./FieldSetupTool";
 
 const KNOWN_EVENTS = [
@@ -23,6 +24,7 @@ const TABS = [
   { key: "settings",  label: "⚙️ Ayarlar"     },
   { key: "rotation",  label: "🔄 Vardiya"      },
   { key: "pit",       label: "👷 Pit Tayfa"    },
+  { key: "coverage",  label: "📊 Kapsama"      },
   { key: "calib",     label: "📐 Kalibre"      },
 ];
 
@@ -134,6 +136,233 @@ function PitTab({ pitCount, pitCreds, scoutNames, changePitCount, config }) {
       </div>
       <p className="admin-pit-info">Pit scoutlar <strong>🔍 Pit</strong> ekranına bu bilgilerle giriş yapar.</p>
     </>
+  );
+}
+
+// ─── COVERAGE TAB ────────────────────────────────────────────────────────────
+/**
+ * Shows a full coverage matrix: each row = a qual match,
+ * each of the 6 columns = a robot slot.
+ * Green = report exists, red = not scouted.
+ * Clicking an uncovered cell opens a tooltip with the suggested seat
+ * and a button to launch EyesFreeTerminal in retroactive mode.
+ */
+function CoverageTab({ config }) {
+  const [schedule,  setSchedule]  = useState([]);
+  const [reports,   setReports]   = useState([]);
+  const [loadState, setLoadState] = useState("idle"); // idle|loading|done|error
+  const [onlyMissing, setOnlyMissing] = useState(false);
+  const [retroTip,  setRetroTip]  = useState(null); // { matchKey, teamKey, seat, rect }
+
+  function reload() {
+    if (!config.eventKey) return;
+    setLoadState("loading");
+    Promise.all([
+      fetchSchedule(config.eventKey).catch(() => []),
+      getOfflineReports().catch(() => []),
+    ]).then(([sched, reps]) => {
+      setSchedule(sched.filter((m) => m.match_key.includes("_qm")));
+      setReports(reps);
+      setLoadState("done");
+    }).catch(() => setLoadState("error"));
+  }
+
+  useEffect(() => {
+    reload();
+    const onReps = () => getOfflineReports().then(setReports).catch(() => {});
+    window.addEventListener("offlineReportsChanged", onReps);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config.eventKey]);
+
+  // coverage map: matchKey → teamKey → { device, count }
+  const coverageMap = useMemo(() => {
+    const map = {};
+    for (const r of reports) {
+      if (!r.match_key || !r.team_key) continue;
+      if (!map[r.match_key]) map[r.match_key] = {};
+      const prev = map[r.match_key][r.team_key];
+      if (!prev) {
+        map[r.match_key][r.team_key] = { device: r.scout_device_id || "?", count: 1 };
+      } else {
+        prev.count++;
+      }
+    }
+    return map;
+  }, [reports]);
+
+  // Summary stats
+  const { fullyCovered, partiallyCovered, neverScouted } = useMemo(() => {
+    let full = 0, partial = 0;
+    const scoutedTeams = new Set(reports.map((r) => r.team_key));
+    const allTeams = new Set(schedule.flatMap((m) => [...m.red, ...m.blue]));
+    for (const m of schedule) {
+      const mc = coverageMap[m.match_key] || {};
+      const all6 = [...m.red, ...m.blue];
+      const covered = all6.filter((tk) => mc[tk]?.count > 0).length;
+      if (covered === 6) full++;
+      else if (covered > 0) partial++;
+    }
+    const never = [...allTeams].filter((tk) => !scoutedTeams.has(tk));
+    return { fullyCovered: full, partiallyCovered: partial, neverScouted: never };
+  }, [schedule, reports, coverageMap]);
+
+  const qNum = (mk) => parseInt(mk.split("_qm")[1]) || 0;
+
+  const visibleMatches = onlyMissing
+    ? schedule.filter((m) => {
+        const mc = coverageMap[m.match_key] || {};
+        return [...m.red, ...m.blue].some((tk) => !mc[tk]?.count);
+      })
+    : schedule;
+
+  function handleCellClick(e, matchKey, teamKey, isCovered) {
+    if (isCovered) { setRetroTip(null); return; }
+    const match = schedule.find((m) => m.match_key === matchKey);
+    if (!match) return;
+    const alliance = match.red.includes(teamKey) ? "red" : "blue";
+    const pos = (alliance === "red" ? match.red : match.blue).indexOf(teamKey) + 1;
+    const seat = `${alliance}${pos}`;
+    const rect = e.currentTarget.getBoundingClientRect();
+    setRetroTip({ matchKey, teamKey, seat, x: rect.left, y: rect.bottom + 6 });
+  }
+
+  function launchRetro() {
+    if (!retroTip) return;
+    window.dispatchEvent(new CustomEvent("launchRetroScout", {
+      detail: { matchKey: retroTip.matchKey, teamKey: retroTip.teamKey, seat: retroTip.seat },
+    }));
+    setRetroTip(null);
+  }
+
+  const SEAT_LABELS = {
+    red1: "R1", red2: "R2", red3: "R3",
+    blue1: "M1", blue2: "M2", blue3: "M3",
+  };
+
+  return (
+    <div className="cov-root" onClick={(e) => { if (!e.target.closest(".cov-tip")) setRetroTip(null); }}>
+      {/* ── Header ── */}
+      <div className="cov-header">
+        <span className="admin-section-label" style={{ margin: 0 }}>📊 Saha Kapsama Takibi</span>
+        <button className="admin-missing-refresh" onClick={reload} disabled={loadState === "loading"}>
+          {loadState === "loading" ? "…" : "↻ Yenile"}
+        </button>
+      </div>
+
+      {loadState === "error" && <p className="admin-pit-info" style={{ color: "#f87171" }}>Takvim yüklenemedi.</p>}
+      {loadState === "done" && (
+        <>
+          {/* ── Summary cards ── */}
+          <div className="cov-summary">
+            <div className="cov-stat cov-stat-good">
+              <span className="cov-stat-val">{fullyCovered}</span>
+              <span className="cov-stat-lbl">Tam Kapsanan</span>
+            </div>
+            <div className="cov-stat cov-stat-warn">
+              <span className="cov-stat-val">{partiallyCovered}</span>
+              <span className="cov-stat-lbl">Eksik Kapsanan</span>
+            </div>
+            <div className="cov-stat cov-stat-err">
+              <span className="cov-stat-val">{schedule.length - fullyCovered - partiallyCovered}</span>
+              <span className="cov-stat-lbl">Hiç Scouting Yok</span>
+            </div>
+            <div className="cov-stat cov-stat-muted">
+              <span className="cov-stat-val">{neverScouted.length}</span>
+              <span className="cov-stat-lbl">Sıfır Raporlu Takım</span>
+            </div>
+          </div>
+
+          {neverScouted.length > 0 && (
+            <div className="cov-never-section">
+              <span className="cov-never-label">Hiç scouting yapılmamış:</span>
+              <div className="cov-never-chips">
+                {neverScouted.map((tk) => (
+                  <span key={tk} className="admin-missing-chip">{tk.replace("frc", "")}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── Filter toggle ── */}
+          <div className="cov-filter-row">
+            <label className="cov-filter-toggle">
+              <input type="checkbox" checked={onlyMissing}
+                onChange={(e) => setOnlyMissing(e.target.checked)} />
+              Sadece eksik maçları göster
+            </label>
+            <span className="cov-filter-hint">{visibleMatches.length} maç</span>
+          </div>
+
+          {/* ── Coverage Matrix ── */}
+          <div className="cov-matrix-wrap">
+            <table className="cov-matrix">
+              <thead>
+                <tr>
+                  <th className="cov-th-q">Q#</th>
+                  <th colSpan={3} className="cov-th-red">🔴 RED</th>
+                  <th colSpan={3} className="cov-th-blue">🔵 BLUE</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleMatches.map((m) => {
+                  const mc = coverageMap[m.match_key] || {};
+                  const allSlots = [
+                    ...m.red.map((tk, i) => ({ tk, alliance: "red", pos: i + 1 })),
+                    ...m.blue.map((tk, i) => ({ tk, alliance: "blue", pos: i + 1 })),
+                  ];
+                  const rowFull = allSlots.every(({ tk }) => mc[tk]?.count > 0);
+                  return (
+                    <tr key={m.match_key} className={rowFull ? "cov-row-full" : ""}>
+                      <td className="cov-td-q">Q{qNum(m.match_key)}</td>
+                      {allSlots.map(({ tk, alliance, pos }) => {
+                        const cov = mc[tk];
+                        const isCov = Boolean(cov?.count);
+                        const device = cov?.device?.replace("seat-", "") || "";
+                        const isSelected = retroTip?.matchKey === m.match_key && retroTip?.teamKey === tk;
+                        return (
+                          <td key={tk}
+                            className={`cov-td cov-td-${alliance}${isCov ? " cov-ok" : " cov-miss"}${isSelected ? " cov-selected" : ""}`}
+                            onClick={(e) => handleCellClick(e, m.match_key, tk, isCov)}
+                            title={isCov ? `${tk} — ${device} (${cov.count} rapor)` : `${tk} — scouting yok`}>
+                            <span className="cov-team-num">{tk.replace("frc", "")}</span>
+                            {isCov
+                              ? <span className="cov-badge cov-badge-ok">{SEAT_LABELS[device] || device || "✓"}</span>
+                              : <span className="cov-badge cov-badge-miss">✗</span>
+                            }
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* ── Retroactive tooltip ── */}
+          {retroTip && (
+            <div className="cov-tip" style={{ position: "fixed", left: retroTip.x, top: retroTip.y }}>
+              <div className="cov-tip-title">📋 Geriye Dönük Scouting</div>
+              <div className="cov-tip-body">
+                <strong>frc{retroTip.teamKey.replace("frc","")}</strong> — {retroTip.matchKey.split("_qm")[0]}_qm{qNum(retroTip.matchKey)}
+              </div>
+              <div className="cov-tip-seat">
+                Gerekli koltuk: <strong>{retroTip.seat.toUpperCase()}</strong>
+              </div>
+              <div className="cov-tip-hint">
+                "{retroTip.seat.toUpperCase()}" sahacısı bu butona bastıktan sonra gelen saha ekranında bu maçı scout etmeli.
+              </div>
+              <div className="cov-tip-actions">
+                <button className="cov-btn-retro" onClick={launchRetro}>
+                  🕹 Saha Moduna Geç (Q{qNum(retroTip.matchKey)})
+                </button>
+                <button className="cov-btn-cancel" onClick={() => setRetroTip(null)}>İptal</button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -394,6 +623,9 @@ export default function AdminPanel() {
           changePitCount={changePitCount} config={config}
         />
       )}
+
+      {/* ── COVERAGE ── */}
+      {tab === "coverage" && <CoverageTab config={config} />}
 
       {/* ── CALIBRATION ── */}
       {tab === "calib" && <FieldSetupTool embedded />}
