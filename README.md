@@ -186,8 +186,8 @@ Varsayılan admin şifresi: **`www.efe123`**
 
 Admin panelinden:
 1. **Etkinlik kodu** gir (örn. `2026miket`)
-2. **TBA API Key** ekle → https://www.thebluealliance.com/account
-3. **OpenRouter API Key** ekle → https://openrouter.ai/keys (War Room AI için)
+2. `backend/.env` içine **TBA_API_KEY** ve **OPENROUTER_API_KEY** ekle (önerilen güvenli yöntem)
+3. İstersen Admin panelinden bu key'leri **yerel override** olarak da girebilirsin
 4. **Takım Numaramız** gir: `9029`
 5. Pit scout sayısını belirle → otomatik kimlik bilgileri oluşturulur
 
@@ -202,6 +202,55 @@ npm run preview        # Lokal üretim önizlemesi
 ```
 
 `dist/` klasörünü herhangi bir static sunucuya (Nginx, GitHub Pages, Netlify vb.) at.
+
+---
+
+### 6. Docker ile Sunucu Deploy (önerilen)
+
+Bu repo artık tam Docker stack ile gelir:
+
+- `postgres` (kalıcı DB)
+- `backend` (FastAPI)
+- `frontend` (Nginx ile static SPA)
+- `caddy` (HTTPS + reverse proxy)
+
+#### 6.1 Hazırlık
+
+```bash
+cp .env.deploy.example .env
+```
+
+`.env` içinde en az şu alanları doldur:
+
+- `DOMAIN` (örn. `scout.teamdomain.com`)
+- `POSTGRES_PASSWORD`
+- `TBA_API_KEY`
+- `OPENROUTER_API_KEY`
+
+#### 6.2 Çalıştırma
+
+```bash
+docker compose up -d --build
+docker compose ps
+```
+
+Uygulama `https://DOMAIN` adresinde açılır.  
+API çağrıları aynı domainde `/api/*` üzerinden backend’e gider.
+
+#### 6.3 Güncelleme
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+#### 6.4 Loglar
+
+```bash
+docker compose logs -f backend
+docker compose logs -f frontend
+docker compose logs -f caddy
+```
 
 ---
 
@@ -282,7 +331,7 @@ Takım kartına tıklayarak aç.
 
 | Sekme | İçerik |
 |---|---|
-| ⚙️ Ayarlar | Etkinlik kodu, TBA key, takım numarası, OpenRouter key/model |
+| ⚙️ Ayarlar | Etkinlik kodu, takım numarası, TBA/OpenRouter yerel key override, model |
 | 🔄 Vardiya | Scouter isimleri, etkinlik başlangıç zamanı, 45 dakikalık rotasyon takvimi |
 | 🗺 Saha Kurulum | Saha fotoğrafı yükle, zone'ları kalibre et (bump, trench, hub, tower) |
 | 🔑 Kimlik Bilgileri | Pit scout hesaplarını otomatik oluştur |
@@ -358,6 +407,39 @@ Backend'in çalışır olduğundan emin ol, ardından:
 cd frontend
 npm run test:e2e          # headless
 npx cypress open          # interaktif UI
+```
+
+---
+
+## Division Notifier (Startup + Background)
+
+Bilgisayar acilir acilmaz arkaplanda calisir, her 10 dakikada bir TBA'yi kontrol eder:
+
+- Takimin division'a atanip atanmadigini tarar
+- Atama olunca kritik masaustu bildirimi gosterir
+- Sesli uyarilar calar
+- Istekli ise app URL'sini otomatik acar
+
+### Kurulum
+
+```bash
+cd tools
+chmod +x install_division_notifier.sh
+./install_division_notifier.sh
+```
+
+Ilk kurulumda `~/.config/nf-division-notifier.env` olusur.
+Burada en az su degiskenleri doldur:
+
+- `TBA_API_KEY`
+- `DIVISION_EVENT_KEYS` (virgulle ayrilmis event key listesi)
+
+### Servis komutlari
+
+```bash
+systemctl --user status nf-division-notifier.service
+journalctl --user -u nf-division-notifier.service -f
+systemctl --user restart nf-division-notifier.service
 ```
 
 ---

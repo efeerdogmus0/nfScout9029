@@ -1,6 +1,5 @@
-import { tbaParams, getTbaKey } from "./adminConfig";
-
-const API_BASE = "http://localhost:8001";
+import { tbaParams } from "./adminConfig";
+import { API_BASE } from "./config";
 
 export async function fetchHubState() {
   const response = await fetch(`${API_BASE}/live/hub-state/current`);
@@ -12,6 +11,17 @@ export async function fetchActiveQualification(eventKey) {
   const response = await fetch(`${API_BASE}/events/${eventKey}/active-qual${tbaParams()}`);
   if (!response.ok) throw new Error("active qual fetch failed");
   return response.json();
+}
+
+/**
+ * Fetch official rankings from TBA for an event.
+ */
+export async function fetchRankings(eventKey) {
+  try {
+    const res = await fetch(`${API_BASE}/events/${eventKey}/rankings${tbaParams()}`);
+    if (!res.ok) return null;
+    return res.json();
+  } catch { return null; }
 }
 
 /**
@@ -74,19 +84,14 @@ export async function fetchSchedule(eventKey) {
  * error values: "NO_KEY" | "INVALID_KEY" | "NOT_FOUND" | "NETWORK" | null
  */
 export async function fetchEventTeams(eventKey) {
-  const key = getTbaKey();
-  if (!key) return { teams: [], error: "NO_KEY" };
-
   try {
-    const response = await fetch(
-      `https://www.thebluealliance.com/api/v3/event/${eventKey}/teams/simple`,
-      { headers: { "X-TBA-Auth-Key": key } }
-    );
+    const response = await fetch(`${API_BASE}/events/${eventKey}/teams${tbaParams()}`);
+    if (response.status === 400) return { teams: [], error: "NO_KEY" };
     if (response.status === 401) return { teams: [], error: "INVALID_KEY" };
     if (response.status === 404) return { teams: [], error: "NOT_FOUND" };
     if (!response.ok)            return { teams: [], error: "NETWORK" };
     const data = await response.json();
-    const teams = data.map((t) => t.key).sort(
+    const teams = data.sort(
       (a, b) => (parseInt(a.replace("frc","")) || 0) - (parseInt(b.replace("frc","")) || 0)
     );
     return { teams, error: null };
@@ -146,13 +151,8 @@ export async function runOverlay(payload) {
  *   endGameFuelPoints          — last 30s both hubs
  */
 export async function fetchMatchData(matchKey) {
-  const key = getTbaKey();
-  if (!key) return null;
   try {
-    const res = await fetch(
-      `https://www.thebluealliance.com/api/v3/match/${matchKey}`,
-      { headers: { "X-TBA-Auth-Key": key } }
-    );
+    const res = await fetch(`${API_BASE}/matches/${matchKey}/tba${tbaParams()}`);
     if (!res.ok) return null;
     return res.json();
   } catch { return null; }
@@ -166,4 +166,38 @@ export async function submitRefineryRevision(payload) {
   });
   if (!response.ok) throw new Error("refinery submit failed");
   return response.json();
+}
+
+export async function postScoutHeartbeat(deviceId, payload) {
+  try {
+    const res = await fetch(`${API_BASE}/live/scout-status?device_id=${encodeURIComponent(deviceId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (err) {
+    return [];
+  }
+}
+
+export async function getStrategyBoard(matchKey) {
+  try {
+    const res = await fetch(`${API_BASE}/matches/${matchKey}/strategy-board`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) { return null; }
+}
+
+export async function postStrategyBoard(matchKey, annotations) {
+  try {
+    const res = await fetch(`${API_BASE}/matches/${matchKey}/strategy-board`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ match_key: matchKey, annotations }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) { return null; }
 }

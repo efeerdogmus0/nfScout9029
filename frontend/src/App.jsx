@@ -9,11 +9,11 @@ import PitScoutPanel     from "./components/PitScoutPanel";
 import VideoScoutPanel   from "./components/VideoScoutPanel";
 import {
   validateLogin,
-  getPitCredentials, getVideoCredentials, getAdminCredential,
+  getAdminCredential,
   FIELD_SEATS, getSeatAssignments, isFreshSeat,
   getNextAvailableSeat, claimSeat, releaseSeat,
+  getRoleSessions, joinRoleSession, leaveRoleSession,
 } from "./adminConfig";
-import { getOfflineReports } from "./storage";
 import { syncReportsIfOnline } from "./sync";
 import QrImportModal from "./components/QrImportModal";
 
@@ -42,7 +42,7 @@ const TABS = [
   { key: "manual",  label: "📖 Kılavuz", adminOnly: false },
 ];
 
-const DEVICE_ID = `app-${Math.random().toString(36).slice(2, 8)}`;
+import { DEVICE_ID } from "./config";
 
 // Human-readable seat labels
 const SEAT_LABEL = {
@@ -52,10 +52,11 @@ const SEAT_LABEL = {
 
 // ─── UNIFIED LOGIN SCREEN ─────────────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
-  // ── Field scout state ──
-  const [fieldName,    setFieldName]    = useState("");
+  const [crewName,     setCrewName]     = useState("");
   const [selectedSeat, setSelectedSeat] = useState(null);
   const [assignments,  setAssignments]  = useState(getSeatAssignments);
+  const [pitSessions,  setPitSessions]  = useState(() => getRoleSessions("pit_scout"));
+  const [videoSessions, setVideoSessions] = useState(() => getRoleSessions("video_scout"));
 
   // Auto-suggest next free seat on first render
   useEffect(() => {
@@ -65,10 +66,12 @@ function LoginScreen({ onLogin }) {
   // Refresh assignments when this component mounts (other devices may have claimed)
   useEffect(() => {
     setAssignments(getSeatAssignments());
+    setPitSessions(getRoleSessions("pit_scout"));
+    setVideoSessions(getRoleSessions("video_scout"));
   }, []);
 
   function fieldLogin() {
-    const name = fieldName.trim();
+    const name = crewName.trim();
     if (!name || !selectedSeat) return;
     claimSeat(selectedSeat, name);
     onLogin({
@@ -77,6 +80,37 @@ function LoginScreen({ onLogin }) {
       role:      "field_scout",
       name,
       seatIndex: FIELD_SEATS.indexOf(selectedSeat),
+    });
+  }
+  function pitLogin() {
+    const name = crewName.trim();
+    if (!name) { setErr("Önce ismini yaz."); return; }
+    const res = joinRoleSession("pit_scout", name, 5, "pit");
+    if (!res.ok) {
+      setErr(res.error === "FULL" ? "Pit dolu (maks 5 kişi)." : "Pit girişi başarısız.");
+      return;
+    }
+    onLogin({
+      username: `pit_${res.session.id}`,
+      seat: res.session.seat,
+      role: "pit_scout",
+      name: res.session.name,
+      seatIndex: -1,
+      sessionId: res.session.id,
+    });
+  }
+  function videoLogin() {
+    const name = crewName.trim();
+    if (!name) { setErr("Önce ismini yaz."); return; }
+    const res = joinRoleSession("video_scout", name, 50, "video");
+    if (!res.ok) { setErr("Video girişi başarısız."); return; }
+    onLogin({
+      username: `video_${res.session.id}`,
+      seat: res.session.seat,
+      role: "video_scout",
+      name: res.session.name,
+      seatIndex: -1,
+      sessionId: res.session.id,
     });
   }
 
@@ -96,8 +130,6 @@ function LoginScreen({ onLogin }) {
     }
   }
 
-  const pitCreds   = getPitCredentials();
-  const videoCreds = getVideoCredentials();
   const adminCred  = getAdminCredential();
 
   return (
@@ -107,20 +139,19 @@ function LoginScreen({ onLogin }) {
         alt="Team NF" className="ef-nf-logo" />
       <h2 className="app-login-title">REBUILT SCOUTING</h2>
       <p className="app-login-sub">2026 · Team NF</p>
+      <input
+        className="app-field-name-input"
+        data-cy="crew-name"
+        placeholder="Adın..."
+        value={crewName}
+        autoComplete="off"
+        autoCapitalize="words"
+        onChange={(e) => { setCrewName(e.target.value); setErr(""); }}
+      />
 
       {/* ── Saha Tayfa — ad + koltuk ── */}
       <p className="app-login-group-label">🕹 Saha Tayfa</p>
       <div className="app-field-login">
-        <input
-          className="app-field-name-input"
-          placeholder="Adın..."
-          value={fieldName}
-          autoComplete="off"
-          autoCapitalize="words"
-          onChange={(e) => setFieldName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && fieldLogin()}
-        />
-
         <div className="app-seat-grid">
           {FIELD_SEATS.map((seat) => {
             const asgn    = assignments[seat];
@@ -130,6 +161,8 @@ function LoginScreen({ onLogin }) {
             return (
               <button
                 key={seat}
+                type="button"
+                data-cy={`seat-${seat}`}
                 className={`app-seat-btn${isRed ? " seat-red" : " seat-blue"}${isSel ? " seat-selected" : ""}${isTaken && !isSel ? " seat-taken" : ""}`}
                 onClick={() => setSelectedSeat(isSel ? null : seat)}
                 title={isTaken && !isSel ? `${asgn.name} bu koltuğu kullanıyor` : seat}
@@ -145,8 +178,10 @@ function LoginScreen({ onLogin }) {
         </div>
 
         <button
+          type="button"
           className="app-field-go-btn"
-          disabled={!fieldName.trim() || !selectedSeat}
+          data-cy="field-login-go"
+          disabled={!crewName.trim() || !selectedSeat}
           onClick={fieldLogin}
         >
           SAHA'YA GİR →
@@ -157,30 +192,28 @@ function LoginScreen({ onLogin }) {
       <div className="app-quick-row">
         <div>
           <p className="app-login-group-label">🔍 Pit Tayfa</p>
-          <div className="app-quick-grid app-quick-grid--sm">
-            {pitCreds.map((c) => (
-              <button key={c.username} className="app-quick-btn qbtn-pit"
-                onClick={() => attempt(c.username, c.pin)}>
-                {c.seat.toUpperCase()}
-              </button>
-            ))}
+          <button className="app-quick-btn qbtn-pit" onClick={pitLogin} disabled={!crewName.trim() || pitSessions.length >= 5}>
+            PITE GİR ({pitSessions.length}/5)
+          </button>
+          <div className="app-role-presence">
+            {pitSessions.map((s) => <span key={s.id} className="app-role-chip">{s.name}</span>)}
+            {!pitSessions.length && <span className="app-role-empty">Henüz kimse yok</span>}
           </div>
         </div>
         <div>
           <p className="app-login-group-label">🎬 Video Tayfa</p>
-          <div className="app-quick-grid app-quick-grid--sm">
-            {videoCreds.map((c) => (
-              <button key={c.username} className="app-quick-btn qbtn-video"
-                onClick={() => attempt(c.username, c.pin)}>
-                {c.seat.toUpperCase()}
-              </button>
-            ))}
+          <button className="app-quick-btn qbtn-video" onClick={videoLogin} disabled={!crewName.trim()}>
+            VİDEOYA GİR ({videoSessions.length})
+          </button>
+          <div className="app-role-presence">
+            {videoSessions.map((s) => <span key={s.id} className="app-role-chip">{s.name}</span>)}
+            {!videoSessions.length && <span className="app-role-empty">Henüz kimse yok</span>}
           </div>
         </div>
         <div>
           <p className="app-login-group-label">⚙️ Admin</p>
           <div className="app-quick-grid app-quick-grid--sm">
-            <button className="app-quick-btn qbtn-admin"
+            <button type="button" className="app-quick-btn qbtn-admin" data-cy="quick-admin"
               onClick={() => attempt(adminCred.username, adminCred.pin)}>
               ADMIN
             </button>
@@ -188,8 +221,8 @@ function LoginScreen({ onLogin }) {
         </div>
       </div>
 
-      {/* ── Manuel PIN girişi (pit/video/admin) ── */}
-      <div className="app-login-divider">pit / video / admin manuel giriş</div>
+      {/* ── Manuel PIN girişi (admin) ── */}
+      <div className="app-login-divider">admin manuel giriş</div>
       <div className="app-login-manual">
         <input ref={inputRef} placeholder="Kullanıcı adı" value={username}
           autoCapitalize="none" autoComplete="username"
@@ -237,19 +270,33 @@ export default function App() {
     prevModeRef.current = mode;
   }, [mode]);
 
-  // Auto-sync offline reports when network is restored
+  // Auto-sync loop (online + periodic + visibility regain)
   useEffect(() => {
-    const handleOnline = async () => {
-      const reports = await getOfflineReports().catch(() => []);
-      if (!reports.length) return;
-      const { synced } = await syncReportsIfOnline(DEVICE_ID, reports);
+    const attemptSync = async () => {
+      const { synced } = await syncReportsIfOnline(DEVICE_ID);
       if (synced > 0) {
         setSyncToast(`✓ ${synced} rapor otomatik gönderildi`);
         setTimeout(() => setSyncToast(""), 4000);
       }
     };
+    const handleOnline = () => { attemptSync(); };
+    const handleVisible = () => {
+      if (document.visibilityState === "visible") attemptSync();
+    };
+    const handleSwMessage = (e) => {
+      if (e?.data?.type === "SYNC_OUTBOX") attemptSync();
+    };
+    const timer = setInterval(attemptSync, 12_000);
     window.addEventListener("online", handleOnline);
-    return () => window.removeEventListener("online", handleOnline);
+    document.addEventListener("visibilitychange", handleVisible);
+    navigator.serviceWorker?.addEventListener?.("message", handleSwMessage);
+    attemptSync();
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("online", handleOnline);
+      document.removeEventListener("visibilitychange", handleVisible);
+      navigator.serviceWorker?.removeEventListener?.("message", handleSwMessage);
+    };
   }, []);
 
   function login(cred) {
@@ -259,6 +306,7 @@ export default function App() {
       role:      cred.role,
       name:      cred.name || cred.username,
       seatIndex: cred.seatIndex ?? -1,
+      sessionId: cred.sessionId || null,
     };
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(a));
     setAuth(a);
@@ -269,6 +317,9 @@ export default function App() {
     // Release field scout seat reservation
     if (auth?.role === "field_scout" && auth?.seat) {
       releaseSeat(auth.seat);
+    }
+    if ((auth?.role === "pit_scout" || auth?.role === "video_scout") && auth?.sessionId) {
+      leaveRoleSession(auth.role, auth.sessionId);
     }
     sessionStorage.removeItem(SESSION_KEY);
     setAuth(null);
@@ -284,7 +335,8 @@ export default function App() {
       <nav className="app-nav">
         <span className="app-title">REBUILT 2026</span>
         {visibleTabs.map((t) => (
-          <button key={t.key} className={mode === t.key ? "active" : ""}
+          <button key={t.key} type="button" data-cy={`nav-${t.key}`}
+            className={mode === t.key ? "active" : ""}
             onClick={() => setMode(t.key)}>
             {t.label}
           </button>

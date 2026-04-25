@@ -26,6 +26,13 @@ class TowerLevel(str, Enum):
     LEVEL_3 = "level_3"
 
 
+class MatchStrategyBoard(Base):
+    __tablename__ = "match_strategy_boards"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_key: Mapped[str] = mapped_column(String(32), index=True, unique=True)
+    annotations: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+
 class MatchScoutReport(Base):
     __tablename__ = "match_scout_reports"
 
@@ -47,3 +54,15 @@ class MatchScoutReport(Base):
     teleop_shoot_timestamps_ms: Mapped[list[int]] = mapped_column(JSON, default=list)
     location_pings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+
+class SyncUploadReceipt(Base):
+    __tablename__ = "sync_upload_receipts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    report_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    match_key: Mapped[str] = mapped_column(String(32), index=True)
+    team_key: Mapped[str] = mapped_column(String(16), index=True)
+    updated_at: Mapped[int] = mapped_column(Integer, default=0)
+    report_row_id: Mapped[int] = mapped_column(Integer, index=True)

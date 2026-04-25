@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getOpenRouterKey, getOpenRouterModel } from "../adminConfig";
 import { analyzeTeam, ZONE_LABEL, classifyXY } from "../teamAnalytics";
+import { API_BASE } from "../config";
 
 const LS_SUMMARY = "teamSummaryCache"; // {[teamKey]: {text, generatedAt, matchCount}}
 
@@ -17,8 +18,6 @@ function loadSummaryCache() {
   catch { return {}; }
 }
 function saveSummaryCache(c) { localStorage.setItem(LS_SUMMARY, JSON.stringify(c)); }
-
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 function teamNum(key) { return (key || "").replace("frc", ""); }
 
@@ -393,8 +392,6 @@ function MatchRow({ report }) {
 
 // ─── AI SUMMARY ───────────────────────────────────────────────────────────────
 async function generateTeamSummary({ teamKey, pit, reports, analysis, apiKey, model }) {
-  if (!apiKey) throw new Error("NO_KEY");
-
   const num = teamNum(teamKey);
   const allNotes = reports.map(r => r.notes).filter(Boolean);
 
@@ -436,32 +433,27 @@ Görev: Bu takım hakkında kısa ama kapsamlı bir scout özeti yaz. Türkçe o
 
 Mümkün olduğunca spesifik ol, soyut kalma.`;
 
-  const resp = await fetch(OPENROUTER_URL, {
+  const resp = await fetch(`${API_BASE}/ai/openrouter-chat`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-      "HTTP-Referer": window.location.origin,
-      "X-Title": "FRC REBUILT Scouting",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: (model || "x-ai/grok-4-fast").trim(),
-      messages: [
-        { role: "system", content: "Sen FRC strateji asistanısın. Türkçe, özlü ve eyleme dönüştürülebilir yanıtlar ver." },
-        { role: "user", content: prompt },
-      ],
+      system: "Sen FRC strateji asistanısın. Türkçe, özlü ve eyleme dönüştürülebilir yanıtlar ver.",
+      prompt,
       temperature: 0.35,
       max_tokens: 600,
+      api_key_override: apiKey || null,
     }),
   });
 
+  if (resp.status === 400) throw new Error("NO_KEY");
   if (resp.status === 401) throw new Error("INVALID_KEY");
   if (resp.status === 402) throw new Error("NO_CREDITS");
   if (resp.status === 429) throw new Error("RATE_LIMIT");
   if (!resp.ok) throw new Error(`API_ERROR_${resp.status}`);
 
   const data = await resp.json();
-  return data.choices?.[0]?.message?.content || "";
+  return data.text || "";
 }
 
 // ─── NOTES & AI TAB ───────────────────────────────────────────────────────────

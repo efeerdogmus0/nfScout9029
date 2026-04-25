@@ -18,6 +18,8 @@ class LocationPing(BaseModel):
 
 
 class MatchScoutReportIn(BaseModel):
+    report_id: str | None = None
+    updated_at: int = 0
     event_key: str
     match_key: str
     team_key: str
@@ -46,6 +48,10 @@ class MatchScheduleItem(BaseModel):
     red_score: int | None = None
     blue_score: int | None = None
     winning_alliance: str | None = None  # "red" | "blue" | "tie" | None
+    # TBA Match_Simple: Unix seconds; used for "next match" countdown in War Room
+    predicted_time: int | None = None
+    actual_time: int | None = None
+    match_number: int = 0
 
 
 class MatchDetailItem(BaseModel):
@@ -87,6 +93,28 @@ class StrategyPromptIn(BaseModel):
     cycle_times: list[float] = Field(default_factory=list)
     hotspots: list[str] = Field(default_factory=list)
     hub_state: HubState
+
+
+class StrategyBoardIn(BaseModel):
+    annotations: list[dict] = Field(default_factory=list)
+
+
+class StrategyBoardOut(BaseModel):
+    match_key: str
+    annotations: list[dict] = Field(default_factory=list)
+
+
+class OpenRouterChatIn(BaseModel):
+    prompt: str
+    system: str = "Sen FRC strateji asistanısın. Türkçe, net ve uygulanabilir yanıtlar ver."
+    model: str | None = None
+    temperature: float = 0.4
+    max_tokens: int = 1200
+    api_key_override: str | None = None
+
+
+class OpenRouterChatOut(BaseModel):
+    text: str
 
 
 class TimelineEvent(BaseModel):
@@ -179,3 +207,17 @@ class VideoFuelSubmitIn(BaseModel):
 class VideoFuelSubmitOut(BaseModel):
     match_key: str
     saved: int
+
+
+class ScoutStatusIn(BaseModel):
+    scout_name: str
+    match_key: str
+    seat: str
+
+
+class ScoutStatusOut(BaseModel):
+    device_id: str
+    scout_name: str
+    match_key: str
+    seat: str
+    last_seen: float

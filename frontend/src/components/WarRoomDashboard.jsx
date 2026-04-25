@@ -7,7 +7,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getEventKey, getMyTeam, getOpenRouterKey, getOpenRouterModel } from "../adminConfig";
-import { fetchSchedule, fetchEPA, runWinPredict, fetchHubState, runTacticalInsight, runOverlay, fetchMatchData } from "../api";
+import { fetchSchedule, fetchEPA, runWinPredict, fetchHubState, runTacticalInsight, runOverlay, fetchMatchData, fetchRankings, getStrategyBoard, postStrategyBoard } from "../api";
 import { getOfflineReports, enrichReportsWithVideoFuel } from "../storage";
 import { generateStrategy, DEFAULT_MODEL } from "../strategyAI";
 import {
@@ -17,9 +17,70 @@ import {
   computeSoS, ZONE_LABEL,
 } from "../teamAnalytics";
 import TeamProfileModal from "./TeamProfileModal";
+import { runWarRoomDecisionEngine, FEATURE_DEFS } from "../warRoomEngine";
 
 const LS_STRAT    = "warRoomStrategy"; // { [match_key]: string }
 const LS_AI_CACHE = "warRoomAICache";  // { [match_key]: string }
+const LS_PICKLIST = "warRoomPickList";
+const LS_COMPARE  = "warRoomCompareTeams";
+
+function normalizeTeamKeyInput(raw) {
+  const t = String(raw || "").trim().replace(/^frc/i, "");
+  if (!/^\d{1,5}$/.test(t)) return null;
+  return `frc${t}`;
+}
+
+function loadPickList() {
+  try {
+    const j = JSON.parse(localStorage.getItem(LS_PICKLIST));
+    if (!j || typeof j !== "object") throw new Error("bad");
+    return {
+      favorites: Array.isArray(j.favorites) ? j.favorites.filter(Boolean) : [],
+      avoid: Array.isArray(j.avoid) ? j.avoid.filter(Boolean) : [],
+      backup: [
+        j.backup?.[0] || null,
+        j.backup?.[1] || null,
+        j.backup?.[2] || null,
+      ],
+      rankingOrder: Array.isArray(j.rankingOrder) ? j.rankingOrder.filter(Boolean) : [],
+    };
+  } catch {
+    return { favorites: [], avoid: [], backup: [null, null, null], rankingOrder: [] };
+  }
+}
+function savePickList(p) {
+  localStorage.setItem(LS_PICKLIST, JSON.stringify(p));
+}
+
+function loadCompareTeams() {
+  try {
+    const j = JSON.parse(localStorage.getItem(LS_COMPARE));
+    if (!Array.isArray(j)) return [];
+    return j.filter(Boolean).slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+function saveCompareTeams(arr) {
+  localStorage.setItem(LS_COMPARE, JSON.stringify(arr.slice(0, 3)));
+}
+
+/** Tek satır metrik — karşılaştırma tablosu için */
+function buildTeamMetrics(teamKey, scoutReports, schedule, epaData) {
+  const sos = computeSoS(teamKey, schedule, epaData);
+  const scout = analyzeTeam(teamKey, scoutReports);
+  return {
+    epa: epaData[teamKey]?.epa ?? null,
+    epaRank: epaData[teamKey]?.rank ?? null,
+    sos: sos.sos,
+    sosTier: sos.tier,
+    adjEpa: sos.adjEpa,
+    avgFuel: scout?.avgFuelTotal ?? null,
+    scoutMatches: scout?.n ?? 0,
+    autoTendency: scout?.autoPathTendency ?? null,
+    problemPct: scout?.matchesWithProblemsPct ?? null,
+  };
+}
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 function loadPitReports() {
@@ -61,6 +122,116 @@ function AiText({ text }) {
 }
 
 function teamNum(key) { return (key || "").replace("frc", ""); }
+
+function qualNumFromKey(matchKey = "") {
+  return parseInt(String(matchKey).split("_qm")[1], 10) || 0;
+}
+
+/** İlk oynanmamış qual (skor yok) — bizim takımın yer aldığı. */
+function findNextUnplayedQualForTeam(schedule, myTeam) {
+  if (!myTeam || !schedule?.length) return null;
+  const ours = schedule
+    .filter((m) => m.match_key?.includes("_qm"))
+    .filter((m) => m.red?.includes(myTeam) || m.blue?.includes(myTeam))
+    .sort((a, b) => qualNumFromKey(a.match_key) - qualNumFromKey(b.match_key));
+  for (const m of ours) {
+    const played = m.red_score != null && m.blue_score != null;
+    if (!played) return m;
+  }
+  return null;
+}
+
+function etaFromPredicted(predictedTime) {
+  if (predictedTime == null) return { line: "TBA saati yok", hint: "Yine de sıra listesinden takip et." };
+  const sec = Number(predictedTime) - Date.now() / 1000;
+  const min = Math.round(sec / 60);
+  if (min > 90) return { line: `~${min} dk sonra (tahmini)`, hint: null };
+  if (min > 2) return { line: `~${min} dk sonra`, hint: null };
+  if (min >= -3) return { line: "Yakında — sıra / saha hazır", hint: null };
+  return { line: "Planlanan saat geçti", hint: "Field delay olabilir; sıra ekranına bak." };
+}
+
+function NextMatchStrip({ schedule, myTeam, epaData, onOpenMatch, selectedKey }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 20000);
+    return () => clearInterval(id);
+  }, []);
+
+  const next = useMemo(
+    () => findNextUnplayedQualForTeam(schedule, myTeam),
+    [schedule, myTeam, tick]
+  );
+  const eta = useMemo(() => (next ? etaFromPredicted(next.predicted_time) : null), [next, tick]);
+
+  const oppSummary = useMemo(() => {
+    if (!next || !myTeam) return null;
+    const opp = next.red.includes(myTeam) ? next.blue : next.red;
+    const epas = opp.map((tk) => epaData[tk]?.epa).filter((v) => v != null);
+    const avgEpa = epas.length ? +(epas.reduce((a, b) => a + b, 0) / epas.length).toFixed(1) : null;
+    const tiers = opp.map((tk) => computeSoS(tk, schedule, epaData).tier).filter(Boolean);
+    const hard = tiers.filter((t) => t === "hard").length;
+    const easy = tiers.filter((t) => t === "easy").length;
+    let sosHint = "SoS: —";
+    if (hard >= 2) sosHint = "SoS: rakipler ağır program";
+    else if (easy >= 2) sosHint = "SoS: rakipler hafif program";
+    else if (tiers.length) sosHint = "SoS: karışık";
+    return { opp, avgEpa, sosHint };
+  }, [next, myTeam, epaData, schedule]);
+
+  if (!myTeam) return null;
+
+  if (!next) {
+    return (
+      <div className="wr-next-strip wr-next-strip--muted">
+        <span className="wr-next-icon">⏱</span>
+        <div className="wr-next-body">
+          <strong>Sonraki maç</strong>
+          <span className="wr-next-sub">Takvimde oynanmamış qual kalmadı veya bu eventte maçın yok.</span>
+        </div>
+      </div>
+    );
+  }
+
+  const qn = qualNumFromKey(next.match_key);
+  const onRed = next.red.includes(myTeam);
+  const isSelected = selectedKey === next.match_key;
+
+  return (
+    <div className={`wr-next-strip${isSelected ? " wr-next-strip--active" : ""}`}>
+      <span className="wr-next-icon">🎯</span>
+      <div className="wr-next-body">
+        <div className="wr-next-row">
+          <strong>Q{qn}</strong>
+          <span className={onRed ? "wr-next-all wr-next-all-red" : "wr-next-all wr-next-all-blue"}>
+            {onRed ? "RED" : "BLUE"} alliance
+          </span>
+          <span className="wr-next-eta">{eta?.line}</span>
+        </div>
+        <div className="wr-next-row wr-next-meta">
+          <span>
+            Rakip ort. EPA: <strong>{oppSummary?.avgEpa != null ? oppSummary.avgEpa : "—"}</strong>
+          </span>
+          <span className="wr-next-dot">·</span>
+          <span>{oppSummary?.sosHint}</span>
+          {oppSummary?.opp?.length ? (
+            <span className="wr-next-oppnums">
+              ({oppSummary.opp.map(teamNum).join(" · ")})
+            </span>
+          ) : null}
+        </div>
+        {eta?.hint && <p className="wr-next-hint">{eta.hint}</p>}
+      </div>
+      <button
+        type="button"
+        className="wr-next-open-btn"
+        onClick={() => onOpenMatch(next.match_key)}
+      >
+        Bu maçı aç
+      </button>
+    </div>
+  );
+}
 
 /** Aggregate field scout data for a single team across all scouted matches. */
 function aggregateScoutData(teamKey, reports) {
@@ -157,6 +328,68 @@ const TEAM_PALETTE = {
   red:  ["#f87171","#fca5a5","#ef4444"],
   blue: ["#60a5fa","#93c5fd","#3b82f6"],
 };
+
+const AUTO_LANES = ["top", "mid", "bot"];
+const LANE_LABEL = { top: "Üst", mid: "Orta", bot: "Alt" };
+function laneOfY(y) {
+  if (y == null) return "mid";
+  if (y < 0.33) return "top";
+  if (y < 0.66) return "mid";
+  return "bot";
+}
+function permutations3(arr) {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    for (let j = 0; j < arr.length; j++) {
+      if (j === i) continue;
+      for (let k = 0; k < arr.length; k++) {
+        if (k === i || k === j) continue;
+        out.push([arr[i], arr[j], arr[k]]);
+      }
+    }
+  }
+  return out;
+}
+function buildAutoLaneProfiles(teamKeys, scoutReports) {
+  const out = {};
+  for (const tk of teamKeys) {
+    const reps = scoutReports.filter(
+      (r) => r.team_key === tk && (r.auto_path_points || []).length >= 2
+    );
+    const starts = reps.map((r) => laneOfY(r.auto_path_points[0]?.y));
+    const counts = { top: 0, mid: 0, bot: 0 };
+    starts.forEach((l) => { counts[l] = (counts[l] || 0) + 1; });
+    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    const bestLane = entries[0]?.[0] || null;
+    const bestN = entries[0]?.[1] || 0;
+    const samples = starts.length;
+    const confidence = samples ? bestN / samples : 0;
+    const seenLanes = AUTO_LANES.filter((l) => counts[l] > 0);
+    const locked = samples >= 2 && confidence >= 0.75;
+    out[tk] = { samples, counts, bestLane, confidence, seenLanes, locked };
+  }
+  return out;
+}
+function optimizeAllianceLanes(teamKeys, profiles) {
+  const perms = permutations3(AUTO_LANES);
+  let best = null;
+  for (const p of perms) {
+    const assignment = {};
+    let score = 0;
+    for (let i = 0; i < teamKeys.length; i++) {
+      const tk = teamKeys[i];
+      const lane = p[i];
+      const pr = profiles[tk];
+      assignment[tk] = lane;
+      if (!pr || !pr.samples) { score -= 0.5; continue; }
+      if (lane === pr.bestLane) score += 3;
+      if (pr.seenLanes.includes(lane)) score += 1;
+      if (pr.locked && lane !== pr.bestLane) score -= 3;
+    }
+    if (!best || score > best.score) best = { score, assignment };
+  }
+  return best?.assignment || {};
+}
 
 // ─── MULTI PATH OVERLAY ───────────────────────────────────────────────────────
 function MultiPathOverlay({ match, scoutReports }) {
@@ -295,6 +528,18 @@ function MultiPathOverlay({ match, scoutReports }) {
   }, [match.match_key, teamPaths]);
 
   const hasPaths = Object.keys(teamPaths).length > 0;
+  const lanePlan = useMemo(() => {
+    const allTeams = [...match.red, ...match.blue];
+    const profiles = buildAutoLaneProfiles(allTeams, scoutReports);
+    const redAssign = optimizeAllianceLanes(match.red, profiles);
+    const blueAssign = optimizeAllianceLanes(match.blue, profiles);
+    const redLine = match.red.map((tk) => `${teamNum(tk)}:${LANE_LABEL[redAssign[tk] || "mid"]}`).join(" · ");
+    const blueLine = match.blue.map((tk) => `${teamNum(tk)}:${LANE_LABEL[blueAssign[tk] || "mid"]}`).join(" · ");
+    const lockWarnings = allTeams
+      .filter((tk) => profiles[tk]?.locked)
+      .map((tk) => `frc${teamNum(tk)} genelde ${LANE_LABEL[profiles[tk].bestLane]} lane (${Math.round((profiles[tk].confidence || 0) * 100)}%)`);
+    return { redLine, blueLine, lockWarnings };
+  }, [match.red, match.blue, scoutReports]);
 
   return (
     <div className="wr-overlay-section">
@@ -316,7 +561,185 @@ function MultiPathOverlay({ match, scoutReports }) {
       {/* width=480 height=240 → exactly 2:1 to match field canvas (640×320) */}
       <canvas ref={canvasRef} width={480} height={240} className="wr-overlay-canvas" />
       {overlayNote && <p className="wr-overlay-note">⚠ {overlayNote}</p>}
+      <p className="wr-overlay-plan">
+        🎯 Çakışmasız öneri — <strong>RED:</strong> {lanePlan.redLine} · <strong>BLUE:</strong> {lanePlan.blueLine}
+      </p>
+      {lanePlan.lockWarnings.length > 0 && (
+        <p className="wr-overlay-hint">
+          🔒 {lanePlan.lockWarnings.join(" · ")}. Bu takımları alışık oldukları lane'de tutup diğerlerini boş lane'lere kaydırın.
+        </p>
+      )}
       {!hasPaths && <p className="wr-overlay-hint">Bu maçtaki takımlar için otonom path henüz scouting edilmemiş.</p>}
+    </div>
+  );
+}
+
+// ─── VISUAL STRATEGY BOARD ───────────────────────────────────────────────────
+function StrategyBoardCanvas({ matchKey, onDataUrlUpdate }) {
+  const canvasRef = useRef(null);
+  const [fieldImg, setFieldImg] = useState(null);
+  const [annotations, setAnnotations] = useState([]);
+  const [mode, setMode] = useState("draw"); // "draw", "arrow", "text"
+  const [color, setColor] = useState("#ef4444");
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [currentPath, setCurrentPath] = useState(null);
+
+  useEffect(() => {
+    const src = localStorage.getItem("fieldCalibImage");
+    if (!src) return;
+    const img = new Image();
+    img.onload = () => setFieldImg(img);
+    img.onerror = () => {};
+    img.src = src;
+  }, []);
+
+  useEffect(() => {
+    getStrategyBoard(matchKey).then(res => {
+      if (res && res.annotations) setAnnotations(res.annotations);
+    });
+  }, [matchKey]);
+
+  function saveAnns(newAnns) {
+    setAnnotations(newAnns);
+    postStrategyBoard(matchKey, newAnns);
+  }
+
+  // Trigger export of the canvas whenever annotations change (for printing)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas && onDataUrlUpdate) {
+       setTimeout(() => onDataUrlUpdate(canvas.toDataURL("image/png")), 100);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [annotations]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+
+    ctx.clearRect(0, 0, W, H);
+
+    if (fieldImg) {
+      ctx.drawImage(fieldImg, 0, 0, W, H);
+      ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(0, 0, W, H);
+    } else {
+      ctx.fillStyle = "#0a0e1a"; ctx.fillRect(0, 0, W, H);
+      for (const z of FIELD_ZONES_FB) {
+        ctx.fillStyle = z.c;
+        ctx.fillRect(z.x * W, z.y * H, z.w * W, z.h * H);
+      }
+    }
+    ctx.strokeStyle = "rgba(255,255,255,0.1)"; ctx.lineWidth = 1;
+    ctx.strokeRect(1, 1, W - 2, H - 2);
+
+    const drawPaths = [...annotations];
+    if (currentPath) drawPaths.push(currentPath);
+
+    for (const ann of drawPaths) {
+      if ((ann.type === "draw" || ann.type === "arrow") && ann.points && ann.points.length > 0) {
+        ctx.strokeStyle = ann.color;
+        ctx.lineWidth = 3;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(ann.points[0].x * W, ann.points[0].y * H);
+        for (let i = 1; i < ann.points.length; i++) {
+          ctx.lineTo(ann.points[i].x * W, ann.points[i].y * H);
+        }
+        ctx.stroke();
+
+        // If arrow, draw arrowhead at the end
+        if (ann.type === "arrow" && ann.points.length >= 2) {
+          const last = ann.points[ann.points.length - 1];
+          const prev = ann.points[ann.points.length - 2];
+          const angle = Math.atan2((last.y - prev.y) * H, (last.x - prev.x) * W);
+          ctx.save();
+          ctx.translate(last.x * W, last.y * H);
+          ctx.rotate(angle);
+          ctx.fillStyle = ann.color;
+          ctx.beginPath();
+          ctx.moveTo(10, 0); ctx.lineTo(-6, -6); ctx.lineTo(-6, 6);
+          ctx.closePath(); ctx.fill();
+          ctx.restore();
+        }
+      } else if (ann.type === "text") {
+        ctx.font = "bold 13px sans-serif";
+        ctx.fillStyle = ann.color;
+        
+        ctx.shadowColor = "rgba(0,0,0,0.8)";
+        ctx.shadowBlur = 4;
+        ctx.fillText(ann.text, ann.x * W, ann.y * H);
+        ctx.shadowBlur = 0;
+      }
+    }
+  }, [fieldImg, annotations, currentPath]);
+
+  function getPt(e) {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height
+    };
+  }
+
+  function handleDown(e) {
+    e.preventDefault();
+    const pt = getPt(e);
+    if (mode === "text") {
+      const txt = prompt("Not girin:");
+      if (txt) {
+        saveAnns([...annotations, { type: "text", x: pt.x, y: pt.y, text: txt, color }]);
+      }
+      return;
+    }
+    setIsDrawing(true);
+    setCurrentPath({ type: mode, color, points: [pt] });
+  }
+
+  function handleMove(e) {
+    if (!isDrawing || !currentPath) return;
+    const pt = getPt(e);
+    setCurrentPath({ ...currentPath, points: [...currentPath.points, pt] });
+  }
+
+  function handleUp(e) {
+    if (!isDrawing || !currentPath) return;
+    setIsDrawing(false);
+    if (currentPath.points.length > 1) {
+      saveAnns([...annotations, currentPath]);
+    }
+    setCurrentPath(null);
+  }
+
+  return (
+    <div className="wr-strat-board-section">
+      <div className="wr-section-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>🖍 Görsel Strateji Tahtası</span>
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <select value={mode} onChange={(e) => setMode(e.target.value)} className="wr-strat-sel">
+            <option value="draw">Serbest Çizim</option>
+            <option value="arrow">Ok (Yön)</option>
+            <option value="text">Not (Tıkla)</option>
+          </select>
+          <select value={color} onChange={(e) => setColor(e.target.value)} className="wr-strat-sel">
+            <option value="#ef4444">Kırmızı</option>
+            <option value="#60a5fa">Mavi</option>
+            <option value="#fcd34d">Sarı</option>
+            <option value="#4ade80">Yeşil</option>
+            <option value="#ffffff">Beyaz</option>
+          </select>
+          <button className="wr-strat-btn" onClick={() => saveAnns(annotations.slice(0, -1))} disabled={annotations.length === 0}>↩ Geri</button>
+          <button className="wr-strat-btn" onClick={() => { if(confirm("Tüm çizimleri sil?")) saveAnns([]); }} disabled={annotations.length === 0}>🗑 Tümü</button>
+        </div>
+      </div>
+      <canvas 
+        ref={canvasRef} width={640} height={320} className="wr-strat-canvas"
+        onPointerDown={handleDown} onPointerMove={handleMove} onPointerUp={handleUp} onPointerLeave={handleUp}
+        style={{ width: "100%", cursor: mode === "text" ? "text" : "crosshair", touchAction: "none" }}
+      />
+      <p className="wr-overlay-hint">Bu tahtaya çizilen her şey anında backend'e kaydedilir ve diğer cihazlarla senkronize olur.</p>
     </div>
   );
 }
@@ -1154,6 +1577,12 @@ function buildPrintHTML({ match, pitReports, scoutReports, epaData, schedule, ai
     </div>
   </div>
 
+  ${opts.strategyBoardImg ? `
+  <div style="margin-top:5mm;page-break-inside:avoid;text-align:center;">
+    <div style="font-size:10pt;font-weight:bold;margin-bottom:1.5mm;">🖍 Görsel Strateji Tahtası</div>
+    <img src="${opts.strategyBoardImg}" style="max-width:100%; border:1pt solid #aaa; border-radius:4px;" />
+  </div>` : ""}
+
   ${strategyText ? `
   <div style="margin-top:5mm;border-top:1pt solid #555;padding-top:2.5mm;page-break-inside:avoid;">
     <div style="font-size:10pt;font-weight:bold;margin-bottom:1.5mm;">📋 Strateji Notları</div>
@@ -1167,6 +1596,764 @@ function buildPrintHTML({ match, pitReports, scoutReports, epaData, schedule, ai
   </div>` : ""}
 </body>
 </html>`;
+}
+
+// ─── RANKING TABLE WIDGET ────────────────────────────────────────────────────
+function RankingTable({ rankings, epaData, onTeamClick }) {
+  const [filter, setFilter] = useState("all"); // 'all', 'top24', 'picks'
+
+  if (!rankings || !rankings.length) {
+    return <div className="wr-empty">TBA sıralama verisi yok veya yüklenmedi.</div>;
+  }
+
+  let list = rankings;
+  
+  if (filter === "top24") {
+    list = list.slice(0, 24);
+  } else if (filter === "picks") {
+    // Gizli potansiyel (Gizli Pick / Yükselişte): EPA rank asıl sıralamadan çok daha iyiyse
+    list = list.filter(r => {
+      const tk = r.team_key;
+      const epaRank = epaData[tk]?.rank;
+      return epaRank && epaRank < r.rank - 3;
+    });
+  }
+
+  return (
+    <div className="wr-ranking-panel" style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+      <div className="wr-match-title" style={{ paddingBottom: "1rem" }}>
+        <span className="wr-match-key">🏆 Canlı Sıralama (TBA & EPA)</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: "0.5rem" }}>
+          <button className={`wr-filter-btn ${filter==="all"?"active":""}`} onClick={() => setFilter("all")}>Tümü</button>
+          <button className={`wr-filter-btn ${filter==="top24"?"active":""}`} onClick={() => setFilter("top24")}>Top 24</button>
+          <button className={`wr-filter-btn ${filter==="picks"?"active":""}`} onClick={() => setFilter("picks")} title="EPA Sıralaması > TBA Sıralaması">📈 Yükselişte / Gizli Potansiyel</button>
+        </div>
+      </div>
+      <div className="cov-matrix-wrap" style={{ maxHeight: "calc(100vh - 150px)", border: "1px solid var(--border-dim)" }}>
+        <table className="cov-matrix">
+          <thead>
+            <tr>
+              <th className="cov-th-q">RANK</th>
+              <th className="cov-th-q">TAKIM</th>
+              <th className="cov-th-q">W-L-T</th>
+              <th className="cov-th-q">RS/Match</th>
+              <th className="cov-th-q">Statbotics EPA</th>
+              <th className="cov-th-q">EPA Rank</th>
+              <th className="cov-th-q">Fark</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map(r => {
+              const tk = r.team_key;
+              const epaObj = epaData[tk] || {};
+              const wlt = r.record ? `${r.record.wins}-${r.record.losses}-${r.record.ties}` : "-";
+              const rs = r.sort_orders ? r.sort_orders[0].toFixed(2) : "-";
+              const diff = epaObj.rank ? (r.rank - epaObj.rank) : null;
+              
+              return (
+                <tr key={tk} onClick={() => onTeamClick(tk)} style={{ cursor: "pointer", borderBottom: "1px solid var(--border-deep)" }}>
+                  <td className="cov-td-q" style={{ textAlign: "center", fontSize: "1rem", color: "var(--text)" }}>{r.rank}</td>
+                  <td className="cov-td-q" style={{ fontWeight: 900, color: "var(--accent)" }}>{teamNum(tk)}</td>
+                  <td className="cov-td-q" style={{ textAlign: "center" }}>{wlt}</td>
+                  <td className="cov-td-q" style={{ textAlign: "center", fontFamily: "monospace" }}>{rs}</td>
+                  <td className="cov-td-q" style={{ textAlign: "center", color: "#fcd34d", fontWeight: 800 }}>{epaObj.epa || "-"}</td>
+                  <td className="cov-td-q" style={{ textAlign: "center" }}>{epaObj.rank || "-"}</td>
+                  <td className="cov-td-q" style={{ textAlign: "center", color: diff > 0 ? "#4ade80" : diff < 0 ? "#f87171" : "var(--muted)", fontWeight: "bold" }}>
+                    {diff > 0 ? `▲ +${diff}` : diff < 0 ? `▼ ${Math.abs(diff)}` : "-"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── ALLIANCE PICK LIST (localStorage) ───────────────────────────────────────
+function TeamQuickAdd({ allTeams, onPickTeam, hint }) {
+  const [q, setQ] = useState("");
+  const filtered = useMemo(() => {
+    const digits = q.replace(/\D/g, "");
+    if (!digits) return [];
+    return allTeams
+      .filter((tk) => teamNum(tk).includes(digits))
+      .slice(0, 14);
+  }, [allTeams, q]);
+
+  function tryAdd(raw) {
+    const tk = normalizeTeamKeyInput(raw) || (filtered[0] ?? null);
+    if (tk) onPickTeam(tk);
+    setQ("");
+  }
+
+  return (
+    <div className="wr-pick-add">
+      <input
+        className="wr-pick-add-input"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder={hint || "Takım # yaz, Enter"}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") tryAdd(q);
+        }}
+      />
+      {filtered.length > 0 && (
+        <div className="wr-pick-suggest">
+          {filtered.map((tk) => (
+            <button
+              key={tk}
+              type="button"
+              className="wr-pick-suggest-row"
+              onClick={() => { onPickTeam(tk); setQ(""); }}
+            >
+              {teamNum(tk)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function stripTeamFromPick(pick, tk) {
+  if (!tk) return pick;
+  return {
+    ...pick,
+    favorites: pick.favorites.filter((t) => t !== tk),
+    avoid: pick.avoid.filter((t) => t !== tk),
+    backup: pick.backup.map((b) => (b === tk ? null : b)),
+    rankingOrder: pick.rankingOrder.filter((t) => t !== tk),
+  };
+}
+
+function pickAddFavorite(pick, tk) {
+  const p = stripTeamFromPick(pick, tk);
+  return { ...p, favorites: [...p.favorites, tk] };
+}
+function pickAddAvoid(pick, tk) {
+  const p = stripTeamFromPick(pick, tk);
+  return { ...p, avoid: [...p.avoid, tk] };
+}
+function pickSetBackupSlot(pick, slot, tk) {
+  if (!tk) {
+    const nb = [...pick.backup];
+    nb[slot] = null;
+    return { ...pick, backup: nb };
+  }
+  const p = stripTeamFromPick(pick, tk);
+  const nb = [...p.backup];
+  nb[slot] = tk;
+  return { ...p, backup: nb };
+}
+function pickAddRanking(pick, tk) {
+  const p = stripTeamFromPick(pick, tk);
+  return { ...p, rankingOrder: [...p.rankingOrder, tk] };
+}
+function moveArr(arr, i, dir) {
+  const next = [...arr];
+  const j = i + dir;
+  if (j < 0 || j >= next.length) return arr;
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
+function PickListPanel({ pick, onPickChange, allTeams, rankByTeam, onTeamProfile }) {
+  const [subView, setSubView] = useState("prep"); // 'prep' | 'ranking'
+
+  return (
+    <div className="wr-pick-root">
+      <div className="wr-match-title wr-pick-head">
+        <span className="wr-match-key">📋 Alliance seçim — Pick list</span>
+        <div className="wr-pick-tabs">
+          <button
+            type="button"
+            className={`wr-filter-btn${subView === "prep" ? " active" : ""}`}
+            onClick={() => setSubView("prep")}
+          >
+            Hazırlık
+          </button>
+          <button
+            type="button"
+            className={`wr-filter-btn${subView === "ranking" ? " active" : ""}`}
+            onClick={() => setSubView("ranking")}
+          >
+            Sıralama günü
+          </button>
+        </div>
+      </div>
+      <p className="wr-pick-blurb">
+        Favoriler, kesinlikle alma ve yedek 1–2–3 bu cihazda saklanır (spreadsheet yerine).
+      </p>
+
+      {subView === "prep" ? (
+        <div className="wr-pick-grid">
+          <section className="wr-pick-card wr-pick-fav">
+            <h3 className="wr-pick-card-title">⭐ Favoriler</h3>
+            <TeamQuickAdd
+              allTeams={allTeams}
+              onPickTeam={(tk) => onPickChange(pickAddFavorite(pick, tk))}
+            />
+            <ul className="wr-pick-list">
+              {pick.favorites.map((tk, i) => (
+                <li key={tk} className="wr-pick-row">
+                  <span className="wr-pick-rank">{i + 1}.</span>
+                  <button type="button" className="wr-pick-team" onClick={() => onTeamProfile(tk)}>
+                    {teamNum(tk)}
+                    {rankByTeam[tk] != null && (
+                      <span className="wr-pick-tba-rank">TBA #{rankByTeam[tk]}</span>
+                    )}
+                  </button>
+                  <div className="wr-pick-row-actions">
+                    <button type="button" className="wr-pick-icon-btn" title="Yukarı" onClick={() => onPickChange({ ...pick, favorites: moveArr(pick.favorites, i, -1) })}>↑</button>
+                    <button type="button" className="wr-pick-icon-btn" title="Aşağı" onClick={() => onPickChange({ ...pick, favorites: moveArr(pick.favorites, i, 1) })}>↓</button>
+                    <button type="button" className="wr-pick-icon-btn wr-pick-remove" title="Çıkar" onClick={() => onPickChange({ ...pick, favorites: pick.favorites.filter((_, j) => j !== i) })}>✕</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="wr-pick-card wr-pick-avoid">
+            <h3 className="wr-pick-card-title">🚫 Kesinlikle alma</h3>
+            <TeamQuickAdd
+              allTeams={allTeams}
+              hint="Ekle…"
+              onPickTeam={(tk) => onPickChange(pickAddAvoid(pick, tk))}
+            />
+            <ul className="wr-pick-list">
+              {pick.avoid.map((tk) => (
+                <li key={tk} className="wr-pick-row">
+                  <button type="button" className="wr-pick-team wr-pick-team-avoid" onClick={() => onTeamProfile(tk)}>
+                    {teamNum(tk)}
+                  </button>
+                  <button type="button" className="wr-pick-icon-btn wr-pick-remove" title="Çıkar" onClick={() => onPickChange({ ...pick, avoid: pick.avoid.filter((t) => t !== tk) })}>✕</button>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <section className="wr-pick-card wr-pick-backup">
+            <h3 className="wr-pick-card-title">🔢 Yedek 1 · 2 · 3</h3>
+            <p className="wr-pick-slot-hint">Pick turunda önce düşündüğün yedekler (tek takım / slot).</p>
+            {[0, 1, 2].map((slot) => (
+              <div key={slot} className="wr-pick-slot">
+                <span className="wr-pick-slot-label">Yedek {slot + 1}</span>
+                {pick.backup[slot] ? (
+                  <div className="wr-pick-slot-filled">
+                    <button type="button" className="wr-pick-team" onClick={() => onTeamProfile(pick.backup[slot])}>
+                      {teamNum(pick.backup[slot])}
+                    </button>
+                    <button type="button" className="wr-pick-icon-btn wr-pick-remove" onClick={() => onPickChange(pickSetBackupSlot(pick, slot, null))}>✕</button>
+                  </div>
+                ) : (
+                  <TeamQuickAdd
+                    allTeams={allTeams}
+                    hint={`Yedek ${slot + 1}…`}
+                    onPickTeam={(tk) => onPickChange(pickSetBackupSlot(pick, slot, tk))}
+                  />
+                )}
+              </div>
+            ))}
+          </section>
+        </div>
+      ) : (
+        <div className="wr-pick-ranking-block">
+          <div className="wr-pick-ranking-toolbar">
+            <TeamQuickAdd
+              allTeams={allTeams}
+              hint="Taslak sıraya takım ekle…"
+              onPickTeam={(tk) => onPickChange(pickAddRanking(pick, tk))}
+            />
+            <button
+              type="button"
+              className="wr-pick-copy-btn"
+              onClick={() => onPickChange({ ...pick, rankingOrder: [...pick.favorites] })}
+            >
+              Favori sırasını buraya kopyala
+            </button>
+            <button
+              type="button"
+              className="wr-pick-copy-btn"
+              onClick={() => onPickChange({ ...pick, rankingOrder: [] })}
+            >
+              Taslağı temizle
+            </button>
+          </div>
+          <p className="wr-pick-blurb">
+            Sıralama / alliance seçim turunda kullanacağın tam liste — üsttekiler önce düşündüğün pick.
+          </p>
+          <ol className="wr-pick-ranking-list">
+            {pick.rankingOrder.map((tk, i) => (
+              <li key={`${tk}-${i}`} className="wr-pick-ranking-item">
+                <span className="wr-pick-rnum">#{i + 1}</span>
+                <button type="button" className="wr-pick-team" onClick={() => onTeamProfile(tk)}>
+                  {teamNum(tk)}
+                  {rankByTeam[tk] != null && <span className="wr-pick-tba-rank">TBA #{rankByTeam[tk]}</span>}
+                </button>
+                <div className="wr-pick-row-actions">
+                  <button type="button" className="wr-pick-icon-btn" onClick={() => onPickChange({ ...pick, rankingOrder: moveArr(pick.rankingOrder, i, -1) })}>↑</button>
+                  <button type="button" className="wr-pick-icon-btn" onClick={() => onPickChange({ ...pick, rankingOrder: moveArr(pick.rankingOrder, i, 1) })}>↓</button>
+                  <button type="button" className="wr-pick-icon-btn wr-pick-remove" onClick={() => onPickChange({ ...pick, rankingOrder: pick.rankingOrder.filter((_, j) => j !== i) })}>✕</button>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComparePanel({ teams, setTeams, allTeams, scoutReports, schedule, epaData, onTeamProfile }) {
+  const metrics = useMemo(
+    () => teams.map((tk) => ({ tk, m: buildTeamMetrics(tk, scoutReports, schedule, epaData) })),
+    [teams, scoutReports, schedule, epaData]
+  );
+
+  function addTeam(tk) {
+    if (teams.includes(tk) || teams.length >= 3) return;
+    setTeams([...teams, tk]);
+  }
+  function removeTeam(tk) {
+    setTeams(teams.filter((t) => t !== tk));
+  }
+
+  const tierLabel = { hard: "zor", easy: "kolay", normal: "normal" };
+
+  return (
+    <div className="wr-cmp-root">
+      <div className="wr-match-title">
+        <span className="wr-match-key">⚖ Karşılaştırma</span>
+        <span className="wr-cmp-sub">2–3 takım seç; aynı metrikler yan yana.</span>
+      </div>
+
+      <div className="wr-cmp-chips">
+        {teams.map((tk) => (
+          <span key={tk} className="wr-cmp-chip">
+            <button type="button" className="wr-cmp-chip-name" onClick={() => onTeamProfile(tk)}>
+              {teamNum(tk)}
+            </button>
+            <button type="button" className="wr-cmp-chip-x" onClick={() => removeTeam(tk)} aria-label="Kaldır">×</button>
+          </span>
+        ))}
+        {teams.length < 3 && (
+          <div className="wr-cmp-add-wrap">
+            <TeamQuickAdd allTeams={allTeams} hint="Karşılaştırmaya ekle…" onPickTeam={addTeam} />
+          </div>
+        )}
+      </div>
+
+      {teams.length < 2 ? (
+        <div className="wr-empty">
+          <p>En az iki takım seç.</p>
+          <p className="wr-empty-hint">Field raporu olmayan takımlarda ort. fuel / oto / sorun % boş görünebilir.</p>
+        </div>
+      ) : (
+        <div className="wr-cmp-table-wrap">
+          <table className="wr-cmp-table">
+            <thead>
+              <tr>
+                <th className="wr-cmp-th-metric">Metrik</th>
+                {metrics.map(({ tk }) => (
+                  <th key={tk} className="wr-cmp-th-team">
+                    <button type="button" onClick={() => onTeamProfile(tk)} className="wr-cmp-th-btn">
+                      {teamNum(tk)}
+                    </button>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>EPA</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.epa != null ? m.epa : "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>SoS (opp. ort. EPA)</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.sos != null ? (+m.sos.toFixed(1)) : "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>SoS katmanı</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.sosTier ? (tierLabel[m.sosTier] || m.sosTier) : "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>Adj. EPA</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.adjEpa != null ? m.adjEpa : "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>Ort. fuel (field)</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.avgFuel != null ? m.avgFuel : "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>Oto eğilimi</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.autoTendency ?? "—"}</td>
+                ))}
+              </tr>
+              <tr>
+                <td>Sorun % (maç)</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.problemPct != null ? `${m.problemPct}%` : "—"}</td>
+                ))}
+              </tr>
+              <tr className="wr-cmp-muted-row">
+                <td>Field örnek (n)</td>
+                {metrics.map(({ tk, m }) => (
+                  <td key={tk}>{m.scoutMatches}</td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function qNum(matchKey = "") {
+  return parseInt(String(matchKey).split("_qm")[1], 10) || 0;
+}
+
+function avg(arr) {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+}
+
+function buildDriverTrend(teamKey, scoutReports) {
+  const mine = scoutReports
+    .filter((r) => r.team_key === teamKey)
+    .sort((a, b) => qNum(b.match_key) - qNum(a.match_key));
+  if (!mine.length) return null;
+  const scoreOf = (r) =>
+    (r.auto_fuel_scored || 0) + (r.teleop_fuel_scored_active || 0) + (r.teleop_fuel_scored_inactive || 0);
+  const last3 = mine.slice(0, 3).map(scoreOf);
+  const prev3 = mine.slice(3, 6).map(scoreOf);
+  const lastAvg = avg(last3);
+  const prevAvg = avg(prev3);
+  const delta = prevAvg == null || lastAvg == null ? null : +(lastAvg - prevAvg).toFixed(1);
+  const form = delta == null ? "n/a" : delta > 4 ? "yukseliyor" : delta < -4 ? "dusuyor" : "stabil";
+  return { lastAvg, prevAvg, delta, form, samples: mine.length };
+}
+
+function buildReliability(teamKey, scoutReports) {
+  const mine = scoutReports.filter((r) => r.team_key === teamKey);
+  if (!mine.length) return null;
+  const counts = { comms: 0, stuck: 0, noshow: 0, foul: 0 };
+  let badMatches = 0;
+  for (const r of mine) {
+    const keys = [
+      ...(r.problems || []),
+      ...((r.timeline || []).filter((e) => e.action === "problem").map((e) => e.key)),
+    ].map((k) => String(k || "").toLowerCase());
+    const had = { comms: false, stuck: false, noshow: false, foul: false };
+    keys.forEach((k) => {
+      if (k.includes("comm")) had.comms = true;
+      if (k.includes("stuck") || k.includes("mech")) had.stuck = true;
+      if (k.includes("no_show") || k.includes("noshow") || k.includes("absent")) had.noshow = true;
+      if (k.includes("foul") || k.includes("penalty")) had.foul = true;
+    });
+    Object.keys(had).forEach((k) => { if (had[k]) counts[k] += 1; });
+    if (Object.values(had).some(Boolean)) badMatches += 1;
+  }
+  const pct = Math.round((badMatches / mine.length) * 100);
+  return {
+    matches: mine.length,
+    pct,
+    counts,
+    critical: pct >= 45 || counts.comms >= 2 || counts.noshow >= 1,
+  };
+}
+
+function AllianceSimulatorPanel({
+  rankings,
+  epaData,
+  scoutReports,
+  pitReports,
+  pickList,
+  myTeam,
+  compareTeams,
+  setCompareTeams,
+  onTeamProfile,
+}) {
+  const [captainSlot, setCaptainSlot] = useState(8);
+  const [rivalSlot, setRivalSlot] = useState(1);
+
+  const captains = useMemo(() => (rankings || []).slice(0, 8).map((r) => r.team_key), [rankings]);
+  useEffect(() => {
+    if (!myTeam || !captains.length) return;
+    const idx = captains.indexOf(myTeam);
+    if (idx >= 0) setCaptainSlot(idx + 1);
+  }, [myTeam, captains]);
+
+  const teamScore = (tk) => {
+    const epa = epaData[tk]?.epa ?? 0;
+    const trend = buildDriverTrend(tk, scoutReports);
+    const rel = buildReliability(tk, scoutReports);
+    const pit = pitReports[tk] || {};
+    const defenseBonus = pit.defense === "Ana Strateji" ? 4 : pit.defense === "Bazen" ? 2 : 0;
+    const trendBonus = trend?.delta != null ? Math.max(-6, Math.min(6, trend.delta * 0.45)) : 0;
+    const relPenalty = rel ? rel.pct * 0.17 : 0;
+    return epa + defenseBonus + trendBonus - relPenalty;
+  };
+
+  const pool = useMemo(() => {
+    const fromRank = (rankings || []).map((r) => r.team_key).slice(0, 40);
+    const p = [...pickList.favorites, ...pickList.rankingOrder, ...fromRank];
+    return Array.from(new Set(p)).filter((tk) => tk && !pickList.avoid.includes(tk));
+  }, [rankings, pickList]);
+
+  const sim = useMemo(() => {
+    if (captains.length < 8) return null;
+    const alliances = captains.map((c) => [c]);
+    const taken = new Set(captains);
+    const remaining = () => pool.filter((tk) => !taken.has(tk));
+    const our = captainSlot - 1;
+    const ourPicks = [];
+    const fallbackNotes = [];
+
+    // Round 1: 1..8
+    for (let i = 0; i < 8; i++) {
+      const cand = remaining().sort((a, b) => teamScore(b) - teamScore(a))[0];
+      if (!cand) continue;
+      alliances[i].push(cand);
+      taken.add(cand);
+      if (i === our) ourPicks.push(cand);
+    }
+    // Round 2: 8..1
+    for (let i = 7; i >= 0; i--) {
+      const options = remaining().sort((a, b) => teamScore(b) - teamScore(a)).slice(0, 3);
+      const pick = options[0];
+      if (!pick) continue;
+      alliances[i].push(pick);
+      taken.add(pick);
+      if (i === our) {
+        ourPicks.push(pick);
+        const fb = options.slice(1, 3).map((t) => teamNum(t)).join(" / ");
+        if (fb) fallbackNotes.push(`Eger ${teamNum(pick)} giderse -> ${fb}`);
+      }
+    }
+
+    const ourAlliance = alliances[our] || [];
+    return { alliances, ourAlliance, ourPicks, fallbackNotes };
+  }, [captains, pool, captainSlot]);
+
+  const candidateRows = useMemo(() => {
+    return pool
+      .filter((tk) => !captains.includes(tk))
+      .map((tk) => ({
+        tk,
+        score: +teamScore(tk).toFixed(1),
+        trend: buildDriverTrend(tk, scoutReports),
+        rel: buildReliability(tk, scoutReports),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 18);
+  }, [pool, captains, scoutReports, pitReports, epaData]);
+
+  const rivalCounter = useMemo(() => {
+    if (!sim) return [];
+    const idx = Math.max(0, Math.min(7, rivalSlot - 1));
+    const rival = sim.alliances[idx] || [];
+    const oppHasDefense = rival.some((tk) => (pitReports[tk]?.defense || "") === "Ana Strateji");
+    return candidateRows
+      .filter((r) => !rival.includes(r.tk))
+      .map((r) => {
+        const pit = pitReports[r.tk] || {};
+        const def = pit.defense === "Ana Strateji" ? 1 : pit.defense === "Bazen" ? 0.5 : 0;
+        const pace = (r.trend?.lastAvg || 0) / 20;
+        const rel = 1 - ((r.rel?.pct || 50) / 100);
+        const score = (oppHasDefense ? def * 2 + pace + rel : pace * 1.5 + def + rel);
+        return { ...r, counterScore: +score.toFixed(2), role: oppHasDefense ? "anti-defense/pacing" : "pure pace" };
+      })
+      .sort((a, b) => b.counterScore - a.counterScore)
+      .slice(0, 5);
+  }, [sim, rivalSlot, candidateRows, pitReports]);
+
+  const trio = compareTeams.slice(0, 3);
+  const autoCompat = useMemo(() => {
+    if (trio.length < 3) return null;
+    const profiles = buildAutoLaneProfiles(trio, scoutReports);
+    const assign = optimizeAllianceLanes(trio, profiles);
+    const taken = {};
+    trio.forEach((tk) => {
+      const lane = assign[tk] || "mid";
+      taken[lane] = (taken[lane] || 0) + 1;
+    });
+    const collisions = Object.values(taken).filter((n) => n > 1).reduce((a, b) => a + (b - 1), 0);
+    const risk = collisions === 0 ? "dusuk" : collisions === 1 ? "orta" : "yuksek";
+    return { assign, risk, profiles };
+  }, [trio, scoutReports]);
+
+  return (
+    <div className="wr-sim-root">
+      <div className="wr-match-title">
+        <span className="wr-match-key">🎛 Alliance Selection Simulator</span>
+      </div>
+      <div className="wr-sim-controls">
+        <label>Kaptan slotumuz
+          <select value={captainSlot} onChange={(e) => setCaptainSlot(Number(e.target.value))} className="wr-strat-sel">
+            {[1,2,3,4,5,6,7,8].map((n) => <option key={n} value={n}>#{n}</option>)}
+          </select>
+        </label>
+        <label>Counter hedef slot
+          <select value={rivalSlot} onChange={(e) => setRivalSlot(Number(e.target.value))} className="wr-strat-sel">
+            {[1,2,3,4,5,6,7,8].map((n) => <option key={n} value={n}>#{n}</option>)}
+          </select>
+        </label>
+      </div>
+
+      {!sim ? (
+        <div className="wr-empty">TBA ranking ile en az 8 kaptan gerekli.</div>
+      ) : (
+        <>
+          <div className="wr-sim-cards">
+            <section className="wr-sim-card">
+              <h3>Bizim alliance (sim)</h3>
+              <p>{sim.ourAlliance.map(teamNum).join(" · ") || "—"}</p>
+              {sim.fallbackNotes.map((n) => <p key={n} className="wr-sim-note">↪ {n}</p>)}
+            </section>
+            <section className="wr-sim-card">
+              <h3>Counter-pick onerisi (slot #{rivalSlot})</h3>
+              {rivalCounter.map((r) => (
+                <p key={r.tk}>
+                  <button type="button" className="wr-pick-team" onClick={() => onTeamProfile(r.tk)}>{teamNum(r.tk)}</button>
+                  {" "}· {r.role} · skor {r.counterScore}
+                </p>
+              ))}
+            </section>
+          </div>
+
+          <div className="wr-cmp-table-wrap">
+            <table className="wr-cmp-table">
+              <thead>
+                <tr>
+                  <th className="wr-cmp-th-metric">Aday</th>
+                  <th>Skor</th>
+                  <th>EPA</th>
+                  <th>Son3 form</th>
+                  <th>Reliability</th>
+                  <th>Heatmap</th>
+                </tr>
+              </thead>
+              <tbody>
+                {candidateRows.map((r) => (
+                  <tr key={r.tk}>
+                    <td>
+                      <button type="button" className="wr-pick-team" onClick={() => onTeamProfile(r.tk)}>{teamNum(r.tk)}</button>
+                    </td>
+                    <td>{r.score}</td>
+                    <td>{epaData[r.tk]?.epa ?? "—"}</td>
+                    <td>
+                      {r.trend?.lastAvg != null ? `${r.trend.lastAvg.toFixed(1)} (${r.trend.form})` : "—"}
+                    </td>
+                    <td className={r.rel?.critical ? "wr-sim-bad" : ""}>{r.rel ? `%${r.rel.pct}` : "—"}</td>
+                    <td>
+                      {r.rel ? `C${r.rel.counts.comms} S${r.rel.counts.stuck} N${r.rel.counts.noshow} F${r.rel.counts.foul}` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="wr-sim-cards">
+            <section className="wr-sim-card">
+              <h3>Auto Path Uyumluluk (3 takim)</h3>
+              <p className="wr-sim-note">Compare sekmesindeki takimlar kullanilir.</p>
+              <div className="wr-cmp-chips">
+                {trio.map((tk) => <span key={tk} className="wr-cmp-chip">{teamNum(tk)}</span>)}
+                {trio.length < 3 && <span className="wr-sim-note">3 takim secmek icin Kiyasla sekmesini kullan.</span>}
+              </div>
+              {autoCompat && (
+                <>
+                  <p>Risk: <strong>{autoCompat.risk}</strong></p>
+                  <p>{trio.map((tk) => `${teamNum(tk)}:${LANE_LABEL[autoCompat.assign[tk] || "mid"]}`).join(" · ")}</p>
+                </>
+              )}
+            </section>
+            <section className="wr-sim-card">
+              <h3>8 alliance snapshot</h3>
+              <ol className="wr-sim-alliances">
+                {sim.alliances.map((al, i) => <li key={`a-${i}`}>#{i + 1}: {al.map(teamNum).join(" · ")}</li>)}
+              </ol>
+            </section>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DecisionEnginePanel({ match, myTeam, pitReports, scoutReports, epaData, schedule }) {
+  const engine = useMemo(
+    () => runWarRoomDecisionEngine({ match, myTeam, pitReports, scoutReports, epaData, schedule }),
+    [match, myTeam, pitReports, scoutReports, epaData, schedule]
+  );
+  if (!engine) return null;
+  return (
+    <div className="wr-match-analysis">
+      <div className="wr-ma-title">🧠 Decision Engine (Signal → Scenario)</div>
+      {!myTeam && (
+        <p className="wr-ma-card-body" style={{ marginBottom: "0.5rem", color: "#fbbf24" }}>
+          Gözlemci modu: takım numarası yok — simülasyon <strong>RED</strong> alliance üzerinden (Admin’de takım gir).
+        </p>
+      )}
+      <div className="wr-ma-cards">
+        {engine.scenarioCards.map((s) => (
+          <div key={s.key} className="wr-ma-card wr-ma-info">
+            <div className="wr-ma-card-head">🎯 {s.label}</div>
+            <p className="wr-ma-card-body">
+              Win% <strong>{Math.round(s.winProb * 100)}</strong>{"\n"}
+              Normal senaryoya göre: <strong>{s.deltaVsNormalPp >= 0 ? "+" : ""}{s.deltaVsNormalPp} pp</strong>{"\n"}
+              Fark dağılımı P10/P50/P90: <strong>{s.p10.toFixed(1)} / {s.p50.toFixed(1)} / {s.p90.toFixed(1)}</strong>{"\n"}
+              (50% baseline’e göre: {s.baselinePp >= 0 ? "+" : ""}{s.baselinePp} pp)
+            </p>
+          </div>
+        ))}
+      </div>
+
+      <details className="wr-feature-dict" style={{ marginTop: "0.4rem", fontSize: "0.62rem", color: "var(--muted)" }}>
+        <summary style={{ cursor: "pointer", fontWeight: 700 }}>Feature sözlüğü</summary>
+        <ul style={{ margin: "0.35rem 0 0 1rem", padding: 0, lineHeight: 1.45 }}>
+          {Object.entries(FEATURE_DEFS).map(([k, v]) => (
+            <li key={k}><code>{k}</code> — {v.label}: {v.desc}</li>
+          ))}
+        </ul>
+      </details>
+
+      <div className="wr-ma-cards" style={{ marginTop: "0.5rem" }}>
+        <div className="wr-ma-card wr-ma-warn">
+          <div className="wr-ma-card-head">🔬 Sensitivity Top 3</div>
+          <p className="wr-ma-card-body">
+            {engine.sensitivity.map((s) => `${s.key}: ${s.deltaWinProb > 0 ? "+" : ""}${s.deltaWinProb}pp`).join("\n")}
+          </p>
+        </div>
+        <div className="wr-ma-card wr-ma-good">
+          <div className="wr-ma-card-head">🎓 Coach 5 Madde</div>
+          <p className="wr-ma-card-body">{engine.roleOutput.coach.join("\n")}</p>
+        </div>
+        <div className="wr-ma-card wr-ma-info">
+          <div className="wr-ma-card-head">🎮 Drive Coach Trigger</div>
+          <p className="wr-ma-card-body">{engine.roleOutput.driveCoach.join("\n")}</p>
+        </div>
+        <div className="wr-ma-card wr-ma-danger">
+          <div className="wr-ma-card-head">🛰 Scout Lead İzleme</div>
+          <p className="wr-ma-card-body">{engine.roleOutput.scoutLead.join("\n")}</p>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ─── MAIN ────────────────────────────────────────────────────────────────────
@@ -1183,10 +2370,23 @@ export default function WarRoomDashboard() {
   const [aiLoading,   setAiLoading]   = useState(false);
   const [aiError,     setAiError]     = useState(null);
   const [epaData,     setEpaData]     = useState({});
+  const [rankings,    setRankings]    = useState([]);
+  const [strategyBoardDataUrl, setStrategyBoardDataUrl] = useState(null);
   const [profileTeam, setProfileTeam] = useState(null); // teamKey for modal
   const [showOursOnly, setShowOursOnly] = useState(false);
   const [filterInput, setFilterInput] = useState("");
+  const [activeMainView, setActiveMainView] = useState("match"); // match | rankings | picklist | compare | allianceSim
+  const [pickList, setPickList] = useState(loadPickList);
+  const [compareTeams, setCompareTeams] = useState(loadCompareTeams);
   const aiRef = useRef(null);
+
+  useEffect(() => {
+    savePickList(pickList);
+  }, [pickList]);
+
+  useEffect(() => {
+    saveCompareTeams(compareTeams);
+  }, [compareTeams]);
 
   // Reload on admin config change
   useEffect(() => {
@@ -1224,8 +2424,30 @@ export default function WarRoomDashboard() {
   }, []);
 
   useEffect(() => {
-    if (eventKey) fetchEPA(eventKey).then(setEpaData).catch(() => {});
+    if (eventKey) {
+      fetchEPA(eventKey).then(setEpaData).catch(() => {});
+      fetchRankings(eventKey)
+        .then(res => { if (res && res.rankings) setRankings(res.rankings); })
+        .catch(() => {});
+    }
   }, [eventKey]);
+
+  const allEventTeams = useMemo(() => {
+    const set = new Set();
+    (rankings || []).forEach((r) => set.add(r.team_key));
+    schedule.forEach((m) => {
+      [...(m.red || []), ...(m.blue || [])].forEach((t) => set.add(t));
+    });
+    return Array.from(set).sort((a, b) => Number(teamNum(a)) - Number(teamNum(b)));
+  }, [rankings, schedule]);
+
+  const rankByTeam = useMemo(() => {
+    const o = {};
+    (rankings || []).forEach((r) => {
+      o[r.team_key] = r.rank;
+    });
+    return o;
+  }, [rankings]);
 
   const qualList = schedule.filter((m) => {
     if (showOursOnly && myTeam) {
@@ -1257,6 +2479,7 @@ export default function WarRoomDashboard() {
         pitReports,
         scoutReports: scoutReps,
         epaData,
+        schedule,
       });
       const next = { ...aiCache, [selMatch.match_key]: text };
       setAiCache(next);
@@ -1291,6 +2514,7 @@ export default function WarRoomDashboard() {
       schedule,
       aiText:        aiCache[selMatch.match_key] || null,
       strategyText:  strategies[selMatch.match_key] || null,
+      strategyBoardImg: strategyBoardDataUrl,
       myTeam,
     });
     const win = window.open("", "_blank", "width=900,height=700");
@@ -1324,21 +2548,91 @@ export default function WarRoomDashboard() {
         </div>
 
         <div className="wr-match-list">
+          <button
+            className={`wr-match-row ${activeMainView === "rankings" ? "selected" : ""}`}
+            onClick={() => setActiveMainView("rankings")}
+            style={{ borderBottom: "2px solid var(--border)", background: activeMainView === "rankings" ? "rgba(251,191,36,0.18)" : "rgba(251,191,36,0.08)" }}
+          >
+            <span style={{ fontWeight: 800, color: "#fbbf24", padding: "0.2rem 0", fontSize: "0.8rem", textAlign: "center" }}>🏆 CANLI SIRALAMA</span>
+          </button>
+          <button
+            className={`wr-match-row ${activeMainView === "picklist" ? "selected" : ""}`}
+            onClick={() => setActiveMainView("picklist")}
+            style={{ borderBottom: "2px solid var(--border)", background: activeMainView === "picklist" ? "rgba(52,211,153,0.22)" : "rgba(52,211,153,0.08)" }}
+          >
+            <span style={{ fontWeight: 800, color: "#6ee7b7", padding: "0.2rem 0", fontSize: "0.8rem", textAlign: "center" }}>📋 PICK LIST</span>
+          </button>
+          <button
+            className={`wr-match-row ${activeMainView === "compare" ? "selected" : ""}`}
+            onClick={() => setActiveMainView("compare")}
+            style={{ borderBottom: "2px solid var(--border)", background: activeMainView === "compare" ? "rgba(147,197,253,0.22)" : "rgba(147,197,253,0.08)" }}
+          >
+            <span style={{ fontWeight: 800, color: "#93c5fd", padding: "0.2rem 0", fontSize: "0.8rem", textAlign: "center" }}>⚖ KIYASLA</span>
+          </button>
+          <button
+            className={`wr-match-row ${activeMainView === "allianceSim" ? "selected" : ""}`}
+            onClick={() => setActiveMainView("allianceSim")}
+            style={{ borderBottom: "2px solid var(--border)", background: activeMainView === "allianceSim" ? "rgba(244,114,182,0.22)" : "rgba(244,114,182,0.08)" }}
+          >
+            <span style={{ fontWeight: 800, color: "#f9a8d4", padding: "0.2rem 0", fontSize: "0.8rem", textAlign: "center" }}>🎛 ALLIANCE SIM</span>
+          </button>
+
           {loading && <p className="wr-loading">Yükleniyor…</p>}
           {!loading && qualList.length === 0 && (
             <p className="wr-loading">Maç bulunamadı.</p>
           )}
           {qualList.map((m) => (
             <MatchRow key={m.match_key} match={m} myTeam={myTeam}
-              selected={selected === m.match_key}
-              onClick={() => setSelected(m.match_key)} />
+              selected={selected === m.match_key && activeMainView === "match"}
+              onClick={() => { setSelected(m.match_key); setActiveMainView("match"); }} />
           ))}
         </div>
       </div>
 
       {/* ── MAIN AREA ── */}
       <div className="wr-main">
-        {!selMatch ? (
+        {myTeam && activeMainView === "match" && (
+          <NextMatchStrip
+            schedule={schedule}
+            myTeam={myTeam}
+            epaData={epaData}
+            selectedKey={selected}
+            onOpenMatch={(k) => { setSelected(k); setActiveMainView("match"); }}
+          />
+        )}
+        {activeMainView === "rankings" ? (
+          <RankingTable rankings={rankings} epaData={epaData} onTeamClick={setProfileTeam} />
+        ) : activeMainView === "picklist" ? (
+          <PickListPanel
+            pick={pickList}
+            onPickChange={setPickList}
+            allTeams={allEventTeams}
+            rankByTeam={rankByTeam}
+            onTeamProfile={setProfileTeam}
+          />
+        ) : activeMainView === "compare" ? (
+          <ComparePanel
+            teams={compareTeams}
+            setTeams={setCompareTeams}
+            allTeams={allEventTeams}
+            scoutReports={scoutReps}
+            schedule={schedule}
+            epaData={epaData}
+            onTeamProfile={setProfileTeam}
+          />
+        ) : activeMainView === "allianceSim" ? (
+          <AllianceSimulatorPanel
+            rankings={rankings}
+            epaData={epaData}
+            scoutReports={scoutReps}
+            pitReports={pitReports}
+            pickList={pickList}
+            myTeam={myTeam}
+            compareTeams={compareTeams}
+            setCompareTeams={setCompareTeams}
+            onTeamProfile={setProfileTeam}
+          />
+        ) : !selMatch ? (
           <div className="wr-empty">
             <p>👈 Sol taraftan bir qual seç</p>
             {!myTeam && (
@@ -1398,6 +2692,14 @@ export default function WarRoomDashboard() {
               epaData={epaData}
               schedule={schedule}
             />
+            <DecisionEnginePanel
+              match={selMatch}
+              myTeam={myTeam}
+              pitReports={pitReports}
+              scoutReports={scoutReps}
+              epaData={epaData}
+              schedule={schedule}
+            />
 
             {/* Live hub state (only when match is on) */}
             <HubStateWidget />
@@ -1435,6 +2737,12 @@ export default function WarRoomDashboard() {
             <TacticalInsightPanel
               match={selMatch} myTeam={myTeam}
               pitReports={pitReports} scoutReports={scoutReps}
+            />
+
+            {/* Visual Strategy Board */}
+            <StrategyBoardCanvas 
+              matchKey={selMatch.match_key} 
+              onDataUrlUpdate={setStrategyBoardDataUrl} 
             />
 
             {/* AI Strategy */}

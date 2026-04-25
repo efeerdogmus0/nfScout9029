@@ -9,8 +9,9 @@ import {
   analyzeTrafficRouting, getReliabilityRoles, analyzeShootingPositions,
   ZONE_LABEL,
 } from "./teamAnalytics";
+import { API_BASE } from "./config";
+import { runWarRoomDecisionEngine } from "./warRoomEngine";
 
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 export const DEFAULT_MODEL = "x-ai/grok-4-fast";
 
 // ─── BUILD TEAM CONTEXT STRING ─────────────────────────────────────────────
@@ -89,7 +90,7 @@ function scoutSummary(reports, teamKey, teamNum) {
 function teamNum(key) { return (key || "").replace("frc", ""); }
 
 // ─── BUILD FULL PROMPT ──────────────────────────────────────────────────────
-export function buildPrompt({ match, myTeam, pitReports, scoutReports, epaData = {} }) {
+export function buildPrompt({ match, myTeam, pitReports, scoutReports, epaData = {}, schedule = [] }) {
   const myNum = (myTeam || "").replace("frc", "");
   const redNums  = match.red.map(teamNum);
   const blueNums = match.blue.map(teamNum);
@@ -180,6 +181,20 @@ export function buildPrompt({ match, myTeam, pitReports, scoutReports, epaData =
     }
   }
 
+  try {
+    const eng = runWarRoomDecisionEngine({
+      match, myTeam, pitReports, scoutReports, epaData, schedule,
+    });
+    if (eng?.roleOutput) {
+      sections.push(`\n=== DECISION ENGINE (sinyal → senaryo özeti) ===`);
+      sections.push(`Alliance simülasyonu: ${eng.ourAlliance?.toUpperCase() || "RED (varsayılan)"}`);
+      eng.roleOutput.coach.forEach((line) => sections.push(`  • ${line}`));
+      sections.push(`Sensitivity (win% üzerinde en etkili türetilmiş faktörler): ${eng.sensitivity.map((s) => `${s.key} ${s.deltaWinProb > 0 ? "+" : ""}${s.deltaWinProb}pp`).join("; ")}`);
+    }
+  } catch {
+    /* engine optional */
+  }
+
   sections.push(`
 === OYUN KURALLARI ÖZETİ (REBUILT 2026) ===
 - FUEL: Hub'a yakıt atarak puan kazanılır (aktif hub'a 3p, inaktif hub'a 1p).
@@ -211,40 +226,30 @@ Yanıt Türkçe olsun. Somut, kısa ve uygulanabilir. Her madde 2-4 cümle, gere
 }
 
 // ─── CALL OPENAI ────────────────────────────────────────────────────────────
-export async function generateStrategy({ apiKey, model, match, myTeam, pitReports, scoutReports, epaData = {} }) {
-  if (!apiKey) throw new Error("NO_KEY");
-
-  const userContent = buildPrompt({ match, myTeam, pitReports, scoutReports, epaData });
+export async function generateStrategy({ apiKey, model, match, myTeam, pitReports, scoutReports, epaData = {}, schedule = [] }) {
+  const userContent = buildPrompt({ match, myTeam, pitReports, scoutReports, epaData, schedule });
   const chosenModel = (model || DEFAULT_MODEL).trim();
 
-  const response = await fetch(OPENROUTER_URL, {
+  const response = await fetch(`${API_BASE}/ai/openrouter-chat`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": window.location.origin,
-      "X-Title": "FRC REBUILT Scouting",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: chosenModel,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Sen FRC strateji asistanısın. Türkçe, net ve eyleme dönüştürülebilir yanıtlar ver. Gereksiz selamlama veya kapanış cümlesi kullanma.",
-        },
-        { role: "user", content: userContent },
-      ],
+      system:
+        "Sen FRC strateji asistanısın. Türkçe, net ve eyleme dönüştürülebilir yanıtlar ver. Gereksiz selamlama veya kapanış cümlesi kullanma.",
+      prompt: userContent,
       temperature: 0.4,
       max_tokens: 1200,
+      api_key_override: apiKey || null,
     }),
   });
 
+  if (response.status === 400) throw new Error("NO_KEY");
   if (response.status === 401) throw new Error("INVALID_KEY");
   if (response.status === 402) throw new Error("NO_CREDITS");
   if (response.status === 429) throw new Error("RATE_LIMIT");
   if (!response.ok) throw new Error(`API_ERROR_${response.status}`);
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || "";
+  return data.text || "";
 }

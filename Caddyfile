@@ -1,0 +1,11 @@
+{$DOMAIN} {
+  encode gzip zstd
+
+  # Backend API
+  handle_path /api/* {
+    reverse_proxy backend:8001
+  }
+
+  # Frontend SPA
+  reverse_proxy frontend:80
+}

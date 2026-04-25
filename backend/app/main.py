@@ -1,13 +1,16 @@
 import os
+from contextlib import asynccontextmanager
 from statistics import mean
 from time import time
 
-from fastapi import Depends, FastAPI, HTTPException
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
-from app.models import HubState, MatchScoutReport
+from app.models import HubState, MatchScoutReport, MatchStrategyBoard, SyncUploadReceipt
 from app.schemas import (
     ActiveQualificationOut,
     CollisionWarning,
@@ -16,12 +19,18 @@ from app.schemas import (
     MatchScheduleItem,
     MatchScoutReportIn,
     MatchScoutReportOut,
+    OpenRouterChatIn,
+    OpenRouterChatOut,
     MultiPathOverlayIn,
     MultiPathOverlayOut,
     RefineryRevisionIn,
     RefineryRevisionOut,
     ScoutLoginIn,
     ScoutLoginOut,
+    ScoutStatusIn,
+    ScoutStatusOut,
+    StrategyBoardIn,
+    StrategyBoardOut,
     StatboticsEPA,
     VideoFuelSubmitIn,
     VideoFuelSubmitOut,
@@ -33,7 +42,13 @@ from app.schemas import (
 )
 from app.services import TBA_BASE, fetch_statbotics_epa, fetch_tba_matches_full, fetch_tba_schedule
 
-app = FastAPI(title="FRC REBUILT Scouting API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="FRC REBUILT Scouting API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,10 +72,8 @@ SEAT_ASSIGNMENTS = {
     "scout_10":     {"pin": "0000", "seat": "seat10", "role": "live_scout"},
 }
 
-
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
+ACTIVE_SCOUTS: dict[str, dict] = {}
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 @app.get("/health")
@@ -74,6 +87,25 @@ def scout_login(payload: ScoutLoginIn) -> ScoutLoginOut:
     if not entry or payload.pin != entry["pin"]:
         raise HTTPException(status_code=401, detail="invalid credentials")
     return ScoutLoginOut(username=payload.username.strip().lower(), seat=entry["seat"], role=entry["role"])
+
+
+@app.post("/live/scout-status", response_model=list[ScoutStatusOut])
+def heartbeat_scout_status(payload: ScoutStatusIn, device_id: str = Query(...)):
+    now = time()
+    ACTIVE_SCOUTS[device_id] = {
+        "device_id": device_id,
+        "scout_name": payload.scout_name,
+        "match_key": payload.match_key,
+        "seat": payload.seat,
+        "last_seen": now
+    }
+    
+    # Prune old scouts (e.g. not seen in last 15 seconds)
+    stale = [k for k, v in ACTIVE_SCOUTS.items() if now - v["last_seen"] > 15.0]
+    for k in stale:
+        del ACTIVE_SCOUTS[k]
+        
+    return [ScoutStatusOut(**s) for s in ACTIVE_SCOUTS.values()]
 
 
 @app.get("/live/hub-state/current", response_model=HubStateResponse)
@@ -124,13 +156,91 @@ def create_report(payload: MatchScoutReportIn, db: Session = Depends(get_db)) ->
     )
 
 
+@app.get("/matches/{match_key}/strategy-board", response_model=StrategyBoardOut)
+def get_strategy_board(match_key: str, db: Session = Depends(get_db)):
+    board = db.scalar(select(MatchStrategyBoard).where(MatchStrategyBoard.match_key == match_key))
+    if not board:
+        return StrategyBoardOut(match_key=match_key, annotations=[])
+    return StrategyBoardOut(match_key=board.match_key, annotations=board.annotations)
+
+
+@app.post("/matches/{match_key}/strategy-board", response_model=StrategyBoardOut)
+def update_strategy_board(match_key: str, payload: StrategyBoardIn, db: Session = Depends(get_db)):
+    board = db.scalar(select(MatchStrategyBoard).where(MatchStrategyBoard.match_key == match_key))
+    if not board:
+        board = MatchStrategyBoard(match_key=match_key, annotations=payload.annotations)
+        db.add(board)
+    else:
+        board.annotations = payload.annotations
+    db.commit()
+    return StrategyBoardOut(match_key=board.match_key, annotations=board.annotations)
+
+
 @app.post("/sync/upload")
 def sync_upload(payload: SyncUploadIn, db: Session = Depends(get_db)) -> dict[str, int]:
     inserted = 0
+    updated = 0
+    conflicted = 0
     for report in payload.reports:
-        create_report(report, db)
+        report_id = (report.report_id or "").strip()
+        if not report_id:
+            # Legacy payloads without report_id: keep backward compatibility.
+            # We do not force idempotency here to avoid deterministic collisions across test runs.
+            create_report(report, db)
+            inserted += 1
+            continue
+        incoming_updated_at = int(report.updated_at or 0)
+
+        receipt = db.scalar(select(SyncUploadReceipt).where(SyncUploadReceipt.report_id == report_id))
+        if receipt:
+            # Idempotent re-upload: already have same report id.
+            if incoming_updated_at <= receipt.updated_at:
+                continue
+            row = db.get(MatchScoutReport, receipt.report_row_id)
+            if row is None:
+                continue
+            row.event_key = report.event_key
+            row.match_key = report.match_key
+            row.team_key = report.team_key
+            row.scout_device_id = report.scout_device_id
+            row.auto_path_points = [p.model_dump() for p in report.auto_path_points]
+            row.auto_fuel_scored = report.auto_fuel_scored
+            row.teleop_fuel_scored_active = report.teleop_fuel_scored_active
+            row.teleop_fuel_scored_inactive = report.teleop_fuel_scored_inactive
+            row.bump_slow_or_stuck = report.bump_slow_or_stuck
+            row.trench_slow_or_stuck = report.trench_slow_or_stuck
+            row.tower_level = report.tower_level
+            row.teleop_shoot_timestamps_ms = report.teleop_shoot_timestamps_ms
+            row.location_pings = [p.model_dump() for p in report.location_pings]
+            row.notes = report.notes
+            receipt.updated_at = incoming_updated_at
+            updated += 1
+            continue
+
+        # Conflict strategy: latest updated_at wins for same match/team.
+        existing_for_pair = db.scalar(
+            select(SyncUploadReceipt)
+            .where(SyncUploadReceipt.match_key == report.match_key)
+            .where(SyncUploadReceipt.team_key == report.team_key)
+            .order_by(SyncUploadReceipt.updated_at.desc())
+        )
+        if existing_for_pair and incoming_updated_at and incoming_updated_at < existing_for_pair.updated_at:
+            conflicted += 1
+            continue
+
+        created = create_report(report, db)
+        receipt_row = SyncUploadReceipt(
+            report_id=report_id,
+            device_id=payload.device_id,
+            match_key=report.match_key,
+            team_key=report.team_key,
+            updated_at=incoming_updated_at,
+            report_row_id=created.id,
+        )
+        db.add(receipt_row)
+        db.commit()
         inserted += 1
-    return {"device_upload_count": inserted}
+    return {"device_upload_count": inserted + updated, "inserted_count": inserted, "updated_count": updated, "conflict_count": conflicted}
 
 
 @app.get("/matches/{match_key}/reports", response_model=list[MatchScoutReportOut])
@@ -164,6 +274,15 @@ def _resolve_tba_key(tba_key: str | None) -> str | None:
     return tba_key or os.getenv("TBA_API_KEY") or None
 
 
+def _resolve_openrouter_key(api_key_override: str | None = None) -> str | None:
+    """Prefer request override, fall back to env var."""
+    return (api_key_override or os.getenv("OPENROUTER_API_KEY") or "").strip() or None
+
+
+def _resolve_openrouter_model(model: str | None = None) -> str:
+    return (model or os.getenv("OPENROUTER_MODEL") or "x-ai/grok-4-fast").strip()
+
+
 @app.get("/events/{event_key}/teams", response_model=list[str])
 async def event_teams(event_key: str, tba_key: str | None = None) -> list[str]:
     """Return sorted list of team keys participating in the event."""
@@ -192,6 +311,40 @@ async def event_teams(event_key: str, tba_key: str | None = None) -> list[str]:
             raise HTTPException(status_code=502, detail=f"TBA_FETCH_ERROR: {exc}")
 
 
+@app.get("/events/{event_key}/rankings")
+async def event_rankings(event_key: str, tba_key: str | None = None) -> dict:
+    api_key = _resolve_tba_key(tba_key)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="TBA_KEY_MISSING")
+    headers = {"X-TBA-Auth-Key": api_key}
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(f"{TBA_BASE}/event/{event_key}/rankings", headers=headers)
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="TBA_KEY_INVALID")
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail="EVENT_NOT_FOUND")
+    if not r.is_success:
+        raise HTTPException(status_code=502, detail=f"TBA_FETCH_ERROR_{r.status_code}")
+    return r.json()
+
+
+@app.get("/matches/{match_key}/tba")
+async def tba_match(match_key: str, tba_key: str | None = None) -> dict:
+    api_key = _resolve_tba_key(tba_key)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="TBA_KEY_MISSING")
+    headers = {"X-TBA-Auth-Key": api_key}
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(f"{TBA_BASE}/match/{match_key}", headers=headers)
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="TBA_KEY_INVALID")
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail="MATCH_NOT_FOUND")
+    if not r.is_success:
+        raise HTTPException(status_code=502, detail=f"TBA_FETCH_ERROR_{r.status_code}")
+    return r.json()
+
+
 def _build_schedule_item(match: dict) -> MatchScheduleItem:
     alliances = match.get("alliances", {})
     red_al  = alliances.get("red",  {})
@@ -213,6 +366,9 @@ def _build_schedule_item(match: dict) -> MatchScheduleItem:
         red_score=red_score,
         blue_score=blue_score,
         winning_alliance=winning,
+        predicted_time=match.get("predicted_time"),
+        actual_time=match.get("actual_time"),
+        match_number=int(match.get("match_number") or 0),
     )
 
 
@@ -368,3 +524,41 @@ def warroom_tactical_insight(payload: TacticalInsightIn) -> dict[str, str]:
             f"Ortalama cycle {avg_cycle:.0f}ms. Defense bu hatta konumlanirsa verim ciddi azalir."
         )
     }
+
+
+@app.post("/ai/openrouter-chat", response_model=OpenRouterChatOut)
+async def openrouter_chat(payload: OpenRouterChatIn) -> OpenRouterChatOut:
+    api_key = _resolve_openrouter_key(payload.api_key_override)
+    if not api_key:
+        raise HTTPException(status_code=400, detail="OPENROUTER_KEY_MISSING")
+
+    req_body = {
+        "model": _resolve_openrouter_model(payload.model),
+        "messages": [
+            {"role": "system", "content": payload.system},
+            {"role": "user", "content": payload.prompt},
+        ],
+        "temperature": payload.temperature,
+        "max_tokens": payload.max_tokens,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": os.getenv("OPENROUTER_HTTP_REFERER", "http://localhost:5173"),
+        "X-Title": os.getenv("OPENROUTER_APP_TITLE", "FRC REBUILT Scouting"),
+    }
+    async with httpx.AsyncClient(timeout=45) as client:
+        r = await client.post(OPENROUTER_URL, json=req_body, headers=headers)
+
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="OPENROUTER_INVALID_KEY")
+    if r.status_code == 402:
+        raise HTTPException(status_code=402, detail="OPENROUTER_NO_CREDITS")
+    if r.status_code == 429:
+        raise HTTPException(status_code=429, detail="OPENROUTER_RATE_LIMIT")
+    if not r.is_success:
+        raise HTTPException(status_code=502, detail=f"OPENROUTER_API_ERROR_{r.status_code}")
+
+    data = r.json()
+    text = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    return OpenRouterChatOut(text=text)

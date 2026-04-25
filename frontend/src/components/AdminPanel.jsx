@@ -6,7 +6,8 @@ import {
   setScoutName, getScoutNames,
 } from "../adminConfig";
 import { fetchEventTeams, fetchSchedule } from "../api";
-import { getOfflineReports } from "../storage";
+import { getOfflineReports, getOutboxMeta } from "../storage";
+import { getSyncTelemetry } from "../sync";
 import FieldSetupTool from "./FieldSetupTool";
 
 const KNOWN_EVENTS = [
@@ -162,17 +163,21 @@ function CoverageTab({ config }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config.eventKey]);
 
-  // coverage map: matchKey → teamKey → { device, count }
+  // coverage map: matchKey → teamKey → { device, count, autoDone }
   const coverageMap = useMemo(() => {
     const map = {};
     for (const r of reports) {
       if (!r.match_key || !r.team_key) continue;
       if (!map[r.match_key]) map[r.match_key] = {};
+      const hasAutoPath = Array.isArray(r.auto_path_points) && r.auto_path_points.length > 0;
+      const hasAutoFail = (r.timeline || []).some((e) => e.action === "problem" && e.key === "auto_fail");
+      const autoDone = hasAutoPath || hasAutoFail;
       const prev = map[r.match_key][r.team_key];
       if (!prev) {
-        map[r.match_key][r.team_key] = { device: r.scout_device_id || "?", count: 1 };
+        map[r.match_key][r.team_key] = { device: r.scout_device_id || "?", count: 1, autoDone };
       } else {
         prev.count++;
+        prev.autoDone = prev.autoDone || autoDone;
       }
     }
     return map;
@@ -317,6 +322,7 @@ function CoverageTab({ config }) {
                               ? <span className="cov-badge cov-badge-ok">{SEAT_LABELS[device] || device || "✓"}</span>
                               : <span className="cov-badge cov-badge-miss">✗</span>
                             }
+                            {isCov && !cov.autoDone && <span className="cov-mini-tag">OTO?</span>}
                           </td>
                         );
                       })}
@@ -350,6 +356,50 @@ function CoverageTab({ config }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function fmtTs(ts) {
+  if (!ts) return "—";
+  try { return new Date(ts).toLocaleTimeString("tr-TR"); } catch { return "—"; }
+}
+
+function SyncTelemetryCard() {
+  const [tele, setTele] = useState(() => getSyncTelemetry());
+  const [meta, setMeta] = useState(() => getOutboxMeta());
+
+  useEffect(() => {
+    const refresh = () => {
+      setTele(getSyncTelemetry());
+      setMeta(getOutboxMeta());
+    };
+    refresh();
+    window.addEventListener("syncTelemetryChanged", refresh);
+    window.addEventListener("outboxMetaChanged", refresh);
+    return () => {
+      window.removeEventListener("syncTelemetryChanged", refresh);
+      window.removeEventListener("outboxMetaChanged", refresh);
+    };
+  }, []);
+
+  const entries = Object.values(meta || {});
+  const pendingCount = entries.filter((m) => ["pending", "sending", "failed"].includes(m.state)).length;
+  const conflictedCount = entries.filter((m) => m.state === "conflicted").length;
+  const failedCount = entries.filter((m) => m.state === "failed").length;
+
+  return (
+    <div className="admin-sync-card">
+      <div className="admin-sync-title">📶 Sync Telemetry</div>
+      <div className="admin-sync-grid">
+        <div className="admin-sync-kpi"><span>Pending</span><strong>{pendingCount}</strong></div>
+        <div className="admin-sync-kpi"><span>Conflicted</span><strong>{conflictedCount}</strong></div>
+        <div className="admin-sync-kpi"><span>Failed</span><strong>{failedCount}</strong></div>
+      </div>
+      <div className="admin-sync-line">Son başarılı sync: <strong>{fmtTs(tele.lastSyncAt)}</strong></div>
+      <div className="admin-sync-line">Son hata: <strong>{tele.lastError || "yok"}</strong></div>
+      <div className="admin-sync-line">Retry ETA: <strong>{fmtTs(tele.retryEta)}</strong></div>
+      <div className="admin-sync-line">Backend: <strong>{tele.backendHealthy ? "erişilebilir" : "erişilemiyor"}</strong></div>
     </div>
   );
 }
@@ -449,7 +499,7 @@ export default function AdminPanel() {
           {tbaSaved && <p className="admin-saved">✓ TBA key kaydedildi.</p>}
           {config.tbaKey
             ? <p className="admin-status">Key: {config.tbaKey.slice(0, 8)}… ✓</p>
-            : <p className="admin-status" style={{ color: "#ef4444" }}>⚠ Key girilmedi.</p>}
+            : <p className="admin-status">Yerel override yok — backend `.env` içindeki `TBA_API_KEY` kullanılacak.</p>}
           <div className="admin-status">Seçili event: <strong>{config.eventKey}</strong></div>
 
           <p className="admin-section-label" style={{ marginTop: "1.5rem" }}>
@@ -482,7 +532,7 @@ export default function AdminPanel() {
           {orSaved && <p className="admin-saved">✓ OpenRouter ayarları kaydedildi.</p>}
           {config.openrouterKey
             ? <p className="admin-status">Key: {config.openrouterKey.slice(0, 10)}… ✓ · model: {config.openrouterModel || "grok-4-fast"}</p>
-            : <p className="admin-status" style={{ color: "#ef4444" }}>⚠ Key girilmedi — War Room AI kapalı.</p>}
+            : <p className="admin-status">Yerel override yok — backend `.env` içindeki `OPENROUTER_API_KEY` kullanılacak · model: {config.openrouterModel || "grok-4-fast"}</p>}
 
           <p className="admin-section-label" style={{ marginTop: "1.5rem" }}>🤖 Takım Numaramız</p>
           <div className="admin-custom-row">
@@ -504,6 +554,7 @@ export default function AdminPanel() {
               Takım: <strong>{config.myTeam.startsWith("frc") ? config.myTeam : `frc${config.myTeam}`}</strong>
             </p>
           )}
+          <SyncTelemetryCard />
         </>
       )}
 

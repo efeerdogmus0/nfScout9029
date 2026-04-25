@@ -58,6 +58,7 @@ export function tbaParams(extra = {}) {
 export const FIELD_SEATS = ["red1", "red2", "red3", "blue1", "blue2", "blue3"];
 
 const SEAT_LS         = "seatAssignments";
+const ROLE_LS         = "roleSessions";
 const SEAT_EXPIRY_MS  = 12 * 60 * 60 * 1000; // 12 hours
 
 export function getSeatAssignments() {
@@ -88,6 +89,62 @@ export function releaseSeat(seat) {
 export function getNextAvailableSeat() {
   const assignments = getSeatAssignments();
   return FIELD_SEATS.find((s) => !isFreshSeat(assignments[s])) || FIELD_SEATS[0];
+}
+
+function cleanupRoleSessions(all) {
+  const next = {};
+  for (const [role, sessions] of Object.entries(all || {})) {
+    next[role] = (sessions || []).filter((s) => isFreshSeat(s));
+  }
+  return next;
+}
+
+function getAllRoleSessions() {
+  try {
+    return cleanupRoleSessions(JSON.parse(localStorage.getItem(ROLE_LS)) || {});
+  } catch {
+    return {};
+  }
+}
+
+function saveAllRoleSessions(all) {
+  localStorage.setItem(ROLE_LS, JSON.stringify(cleanupRoleSessions(all)));
+}
+
+/** Returns active sessions for a role, sorted by join time. */
+export function getRoleSessions(role) {
+  const all = getAllRoleSessions();
+  return [...(all[role] || [])].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+}
+
+/**
+ * Join a role queue by name.
+ * - role: "pit_scout" | "video_scout"
+ * - maxCount: capacity limit (pit = 5)
+ * - seatPrefix: "pit" or "video"
+ */
+export function joinRoleSession(role, name, maxCount = Infinity, seatPrefix = "role") {
+  const n = (name || "").trim();
+  if (!n) return { ok: false, error: "EMPTY_NAME" };
+  const all = getAllRoleSessions();
+  const list = (all[role] || []).slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  if (list.length >= maxCount) return { ok: false, error: "FULL", count: list.length };
+  const used = new Set(list.map((s) => s.seat));
+  let idx = 1;
+  while (used.has(`${seatPrefix}${idx}`)) idx++;
+  const sess = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name: n, seat: `${seatPrefix}${idx}`, ts: Date.now() };
+  list.push(sess);
+  all[role] = list;
+  saveAllRoleSessions(all);
+  return { ok: true, session: sess, count: list.length };
+}
+
+/** Leave role queue by session id. */
+export function leaveRoleSession(role, sessionId) {
+  const all = getAllRoleSessions();
+  const list = (all[role] || []).filter((s) => s.id !== sessionId);
+  all[role] = list;
+  saveAllRoleSessions(all);
 }
 
 // ─── CREDENTIALS (pit / video / admin only) ───────────────────────────────────

@@ -4,3 +4,7 @@ __pycache__/
 node_modules/
 dist/
 rebuilt.db
+.env
+backend/.env
+frontend/.env.local
+frontend/.env.production

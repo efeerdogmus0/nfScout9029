@@ -1,0 +1,15 @@
+[Unit]
+Description=NF Division Notifier (TBA poller)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/frc-rebuilt-scouting-app
+EnvironmentFile=%h/.config/nf-division-notifier.env
+ExecStart=/usr/bin/python3 %h/Projects/frc-rebuilt-scouting-app/tools/division_notifier.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

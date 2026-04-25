@@ -13,10 +13,12 @@
 import { useState } from "react";
 import { setAdminConfig, getAdminConfig } from "../adminConfig";
 import { saveReport, clearOfflineReports } from "../storage";
+import StrategyDashboard from "./StrategyDashboard";
 
 const EVENT_KEY  = "2026test";
-const TOTAL_QUAL = 40;
-const PLAYED_QUAL = 30;
+const TOTAL_QUAL_DEFAULT = 40;
+const PLAYED_QUAL_DEFAULT = 30;
+const RNG_SEED_DEFAULT = 9029;
 
 // ─── TEAM ROSTER ────────────────────────────────────────────────────────────
 const TEAMS = [
@@ -85,8 +87,9 @@ function generatePitReport(teamNum, rng) {
     return {
       drive: "Tank",
       driveMotor: rng.pick(["NEO", "Falcon 500"]),
+      intake: rng.pick(["Yer", "Her İkisi"]),
       shootRange: "Yok",
-      climbTeleop: rng.pick(["Yok", "L1"]),
+      climbTeleop: rng.pick(["Yok", "L1 (10p)"]),
       climbAuto: "Yok",
       bump: rng.bool(0.8),
       trench: rng.bool(0.7),
@@ -94,7 +97,16 @@ function generatePitReport(teamNum, rng) {
       consistency: rng.pick(["Güvenilir", "Orta"]),
       autoFuel: 0,
       teleopFuel: 0,
+      fuelPerSecond: +(rng.gauss(0.4, 0.2)).toFixed(1),
       carrierCap: rng.int(1, 3),
+      limelightCount: rng.int(0, 1),
+      limelightModel: rng.pick(["LL2", "LL3", "LL3G"]),
+      swerveModel: null,
+      swerveTorque: null,
+      inspectionWeight: +(rng.gauss(54, 2.5)).toFixed(1),
+      inspectionStatus: rng.pick(["passed","passed","pending","failed"]),
+      inspectionNotes: rng.bool(0.3) ? "Defans botu, bumper bağlantısı tekrar kontrol edildi." : "",
+      interviewNotes: rng.bool(0.45) ? "Sürücü defans odaklı oynuyor, foul riskini biliyor." : "",
       notes: "Defans odaklı, bump/trench blokajı yapıyor.",
     };
   }
@@ -106,8 +118,9 @@ function generatePitReport(teamNum, rng) {
   return {
     drive:      tier <= 1 ? "Swerve" : rng.pick(drives.slice(1)),
     driveMotor: tier === 0 ? "Kraken X60" : rng.pick(motors),
+    intake: rng.pick(["Yer", "Human Player", "Her İkisi"]),
     shootRange: [ranges[2], ranges[2], ranges[1], rng.pick(ranges.slice(1)), ranges[0]][tier],
-    climbTeleop: rng.pick(climbOptions),
+    climbTeleop: rng.pick(climbOptions).replace("L1","L1 (10p)").replace("L2","L2 (20p)").replace("L3","L3 (30p)"),
     climbAuto:  rng.bool(tier === 0 ? 0.6 : tier === 1 ? 0.3 : 0.1) ? "L1" : "Yok",
     bump:       rng.bool([0.3, 0.5, 0.6, 0.7, 0.8][tier]),
     trench:     rng.bool([0.3, 0.5, 0.6, 0.7, 0.8][tier]),
@@ -115,14 +128,31 @@ function generatePitReport(teamNum, rng) {
     consistency: consts[Math.max(0, tier - 1 + rng.int(-1, 1))],
     autoFuel:   Math.max(0, Math.round(rng.gauss(autoFuelBase, autoFuelBase * 0.3))),
     teleopFuel: Math.max(0, Math.round(rng.gauss(teleopFuelBase, teleopFuelBase * 0.3))),
+    fuelPerSecond: +(Math.max(0.2, rng.gauss([1.8, 1.4, 0.95, 0.55, 0.4][tier], 0.25))).toFixed(1),
     carrierCap: [8, 7, 5, 3, 2][tier] + rng.int(-1, 1),
+    limelightCount: rng.int(tier <= 1 ? 1 : 0, tier === 0 ? 3 : tier === 1 ? 2 : 1),
+    limelightModel: rng.pick(["LL2", "LL2+", "LL3", "LL3G", "LL4"]),
+    swerveModel: tier <= 1 ? rng.pick(["MK4i","MK5n","Swerve X"]) : (rng.bool(0.3) ? rng.pick(["MK4","MK4n"]) : null),
+    swerveTorque: tier <= 1 ? rng.pick(["L1","L2","L3"]) : (rng.bool(0.2) ? "L2" : null),
+    inspectionWeight: +(rng.gauss(56.2 - tier * 0.8, 2.2)).toFixed(1),
+    inspectionStatus: rng.pick(["passed","passed","passed","pending","failed"]),
+    inspectionNotes: rng.bool(0.28) ? rng.pick([
+      "İlk kontrolde kablo düzeni düzeltildi.",
+      "Bumper yüksekliği sınırda, revizyon sonrası geçti.",
+      "Ağırlık limiti yakın, sonradan mekanizma çıkarıldı.",
+    ]) : "",
+    interviewNotes: rng.bool(0.55) ? rng.pick([
+      "2. pick olarak savunma+taşıma rolünü kabul ediyorlar.",
+      "Auto üst lane tercih ediyorlar.",
+      "Sürücü baskı altında tempoyu koruyor.",
+    ]) : "",
     notes: rng.bool(0.6) ? rng.pick(noteBank) : "",
   };
 }
 
 // ─── SCHEDULE GENERATOR ──────────────────────────────────────────────────────
 // Each team plays ~8 matches in 40 quals (240 slots / 30 teams = 8)
-function generateSchedule(rng) {
+function generateSchedule(rng, totalQual) {
   const schedule = [];
   const playCount = Object.fromEntries(TEAMS.map(t => [t, 0]));
 
@@ -134,7 +164,7 @@ function generateSchedule(rng) {
     return pool.slice(0, n);
   }
 
-  for (let q = 1; q <= TOTAL_QUAL; q++) {
+  for (let q = 1; q <= totalQual; q++) {
     const used = [];
     const red  = pickTeams(used, 3); used.push(...red);
     const blue = pickTeams(used, 3); used.push(...blue);
@@ -171,6 +201,52 @@ const ZONE_CENTER = {
   red_trench_bot:  { x: 0.695, y: 0.85  },
 };
 
+const LANE_Y = { top: 0.18, mid: 0.50, bot: 0.82 };
+const ARCHETYPE_PATH_STYLE = {
+  0: ["long_aggressive", "long_safe", "mid_control", "lane_commit"],
+  1: ["mid_control", "lane_commit", "long_safe", "short_safe"],
+  2: ["lane_commit", "mid_control", "short_safe"],
+  3: ["short_safe", "lane_commit"],
+  4: ["short_safe"],
+};
+
+const AUTO_TEMPLATE = {
+  // Points are normalised in local alliance frame:
+  // blue starts from x≈0.08 moving right; red mirrors horizontally.
+  long_aggressive: [
+    { x: 0.08, y: 0.00, t: 0 },
+    { x: 0.26, y: 0.02, t: 3400 },
+    { x: 0.43, y: 0.03, t: 7600 },
+    { x: 0.57, y: -0.06, t: 11800 },
+    { x: 0.63, y: 0.02, t: 15000 },
+  ],
+  long_safe: [
+    { x: 0.08, y: 0.00, t: 0 },
+    { x: 0.24, y: 0.00, t: 3800 },
+    { x: 0.39, y: 0.00, t: 8000 },
+    { x: 0.51, y: 0.01, t: 12200 },
+    { x: 0.57, y: 0.00, t: 15000 },
+  ],
+  mid_control: [
+    { x: 0.08, y: 0.00, t: 0 },
+    { x: 0.21, y: 0.01, t: 4200 },
+    { x: 0.33, y: 0.03, t: 9000 },
+    { x: 0.44, y: 0.00, t: 15000 },
+  ],
+  lane_commit: [
+    { x: 0.08, y: 0.00, t: 0 },
+    { x: 0.20, y: 0.00, t: 4300 },
+    { x: 0.29, y: 0.00, t: 9000 },
+    { x: 0.37, y: 0.00, t: 15000 },
+  ],
+  short_safe: [
+    { x: 0.08, y: 0.00, t: 0 },
+    { x: 0.16, y: 0.00, t: 5200 },
+    { x: 0.23, y: 0.00, t: 11000 },
+    { x: 0.27, y: 0.00, t: 15000 },
+  ],
+};
+
 /**
  * Returns the specific bump/trench zone names this team prefers for this match.
  * Deterministic given the PRNG state — called once per team/match combination.
@@ -199,27 +275,90 @@ function pickZonePreferences(alliance, pitData, rng) {
 
 // ─── AUTO PATH GENERATOR ─────────────────────────────────────────────────────
 // EF convention: blue=left (x≈0.07), red=right (x≈0.93), y=0 top
-function generateAutoPath(alliance, tier, rng) {
+function generateAutoPath(alliance, tier, lane, rng) {
   if (tier === 3 && rng.bool(0.5)) return [];
   if (tier === 4 && rng.bool(0.7)) return [];
+  const style = rng.pick(ARCHETYPE_PATH_STYLE[tier] || ARCHETYPE_PATH_STYLE[2]);
+  const base = AUTO_TEMPLATE[style] || AUTO_TEMPLATE.mid_control;
+  const laneY = LANE_Y[lane] ?? LANE_Y.mid;
+  const yNoise = tier <= 1 ? 0.018 : tier === 2 ? 0.024 : 0.03;
+  const xNoise = tier <= 1 ? 0.012 : tier === 2 ? 0.018 : 0.024;
 
-  const startX = alliance === "red" ? rng.gauss(0.93, 0.03) : rng.gauss(0.07, 0.03);
-  const startY = rng.gauss(0.5, 0.15);
-  const points = [{ x: clamp(startX), y: clamp(startY), t_ms: 0 }];
+  const mapped = base.map((p, i) => {
+    // Convert local frame to field frame and mirror for red alliance
+    const bx = clamp(p.x + rng.gauss(0, xNoise));
+    const by = clamp(laneY + p.y + rng.gauss(0, yNoise));
+    const x = alliance === "red" ? clamp(1 - bx) : bx;
+    return { x, y: by, t_ms: p.t };
+  });
+  // Keep strictly increasing timestamps
+  return mapped.map((p, i) => ({ ...p, t_ms: i === 0 ? 0 : Math.max(mapped[i - 1].t_ms + 800, p.t_ms) }));
+}
 
-  const steps  = [4, 5, 6, 4, 2][tier] + rng.int(0, 2);
-  const targetX = rng.gauss(0.5, 0.06);
-  const targetY = rng.gauss(0.5, 0.08);
+function inferLaneFromPreference(pref, rng) {
+  if (pref?.bumpZone?.includes("top") || pref?.trenchZone?.includes("top")) return "top";
+  if (pref?.bumpZone?.includes("bot") || pref?.trenchZone?.includes("bot")) return "bot";
+  return rng.pick(["top","mid","bot"]);
+}
 
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    points.push({
-      x: clamp(startX + (targetX - startX) * t + rng.gauss(0, 0.03)),
-      y: clamp(startY + (targetY - startY) * t + rng.gauss(0, 0.05)),
-      t_ms: Math.round(i / steps * 15000),  // auto lasts ~15 s
-    });
+function laneOfPath(path) {
+  if (!path?.length) return "mid";
+  const y = path[0].y;
+  if (y < 0.34) return "top";
+  if (y > 0.66) return "bot";
+  return "mid";
+}
+
+// P6: rollout validation for generated auto paths
+function validateAndFixAutoPath(path, expectedLane) {
+  if (!Array.isArray(path) || !path.length) return [];
+  const out = [];
+  let prevT = -1;
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i];
+    const x = clamp(Number.isFinite(p.x) ? p.x : 0.5);
+    const y = clamp(Number.isFinite(p.y) ? p.y : 0.5);
+    let t = Number.isFinite(p.t_ms) ? Math.max(0, p.t_ms) : i * 3000;
+    if (t <= prevT) t = prevT + 900;
+    out.push({ x, y, t_ms: t });
+    prevT = t;
   }
-  return points;
+  // Clamp max segment speed (normalised units / ms)
+  const MAX_V = 0.00017; // ~0.17 field units per second
+  for (let i = 1; i < out.length; i++) {
+    const a = out[i - 1], b = out[i];
+    const d = Math.hypot(b.x - a.x, b.y - a.y);
+    const dt = Math.max(1, b.t_ms - a.t_ms);
+    const v = d / dt;
+    if (v > MAX_V) {
+      out[i].t_ms = Math.round(a.t_ms + d / MAX_V);
+    }
+  }
+  // Lane consistency: first node should match expected lane band
+  const lane = laneOfPath(out);
+  if (expectedLane && lane !== expectedLane) {
+    const targetY = LANE_Y[expectedLane] ?? LANE_Y.mid;
+    const delta = targetY - out[0].y;
+    out.forEach((p) => { p.y = clamp(p.y + delta * 0.75); });
+  }
+  return out;
+}
+
+// P4: match context (pressure, lane conflict, defense intensity) and its effects
+function buildMatchContext(match, pitReports, rng) {
+  const allTeams = [...match.red, ...match.blue];
+  const defCount = allTeams.filter((tk) => (pitReports[tk]?.defense || "") === "Ana Strateji").length;
+  const defenseIntensity = Math.min(1, defCount / 4);
+  const pressure = clamp(rng.gauss(0.48 + defenseIntensity * 0.22, 0.15), 0.05, 0.98);
+  return { pressure, defenseIntensity };
+}
+
+function contextAdjustedFuel(base, tier, ctx, rng) {
+  const tierResilience = [0.9, 0.76, 0.62, 0.42, 0.35][tier] ?? 0.5;
+  const volatility = [0.08, 0.12, 0.18, 0.26, 0.22][tier] ?? 0.16;
+  const impact = ctx.pressure * (1 - tierResilience);
+  const scale = Math.max(0.35, 1 - impact + rng.gauss(0, volatility));
+  return Math.max(0, Math.round(base * scale));
 }
 
 // ─── LOCATION PINGS GENERATOR ─────────────────────────────────────────────────
@@ -358,7 +497,10 @@ function generateMatchScore(match, pitReports, rng) {
       const auto   = Math.max(0, Math.round(rng.gauss(pit.autoFuel   || [20,14,8,3,0][tier], 4)));
       const teleop = Math.max(0, Math.round(rng.gauss(pit.teleopFuel || [45,30,16,6,0][tier], 7)));
       // Climb RP simulation
-      const climbPts = { L3: 15, L2: 10, L1: 5, Yok: 0 }[pit.climbTeleop] || 0;
+      const climbPts =
+        pit.climbTeleop?.includes("L3") ? 15 :
+        pit.climbTeleop?.includes("L2") ? 10 :
+        pit.climbTeleop?.includes("L1") ? 5 : 0;
       const climbed  = rng.bool([0.85, 0.75, 0.6, 0.35, 0.2][tier]) ? climbPts : 0;
       total += auto + teleop + climbed;
     }
@@ -372,12 +514,14 @@ function generateMatchScore(match, pitReports, rng) {
 }
 
 // ─── MAIN GENERATOR ──────────────────────────────────────────────────────────
-async function generateRegional(onProgress) {
-  const rng = makePRNG(9029);
+async function generateRegional(config, onProgress) {
+  const rng = makePRNG(config.seed || RNG_SEED_DEFAULT);
+  const totalQual = config.totalQual || TOTAL_QUAL_DEFAULT;
+  const playedQual = Math.min(config.playedQual || PLAYED_QUAL_DEFAULT, totalQual);
 
   // 1. Generate schedule (skeleton, scores added after pit generation)
   onProgress("Takvim oluşturuluyor…");
-  const schedule = generateSchedule(rng);
+  const schedule = generateSchedule(rng, totalQual);
 
   // 2. Generate pit reports for all 30 teams
   onProgress("Pit raporları oluşturuluyor…");
@@ -388,7 +532,7 @@ async function generateRegional(onProgress) {
   localStorage.setItem("pitReports", JSON.stringify(pitReports));
 
   // Embed scores into the played quals of the schedule
-  for (let qi = 0; qi < PLAYED_QUAL; qi++) {
+  for (let qi = 0; qi < playedQual; qi++) {
     const scores = generateMatchScore(schedule[qi], pitReports, rng);
     Object.assign(schedule[qi], scores);
   }
@@ -400,11 +544,13 @@ async function generateRegional(onProgress) {
 
   onProgress("Saha raporları oluşturuluyor…");
   let saved = 0;
-  for (let qi = 0; qi < PLAYED_QUAL; qi++) {
+  for (let qi = 0; qi < playedQual; qi++) {
     const match = schedule[qi];
+    const matchCtx = buildMatchContext(match, pitReports, rng);
     const allTeams = [...match.red, ...match.blue];
     const alliances = [...Array(3).fill("red"), ...Array(3).fill("blue")];
     const seats     = ["red1","red2","red3","blue1","blue2","blue3"];
+    const laneMap = {};
 
     for (let ri = 0; ri < 6; ri++) {
       const teamKey  = allTeams[ri];
@@ -416,16 +562,35 @@ async function generateRegional(onProgress) {
       // Pick this robot's preferred zones — must happen before pings/timeline
       const preferences = pickZonePreferences(alliance, pit, rng);
 
-      const autoPath = generateAutoPath(alliance, tier, rng);
+      const lane = inferLaneFromPreference(preferences, rng);
+      laneMap[teamKey] = lane;
+      const rawAutoPath = generateAutoPath(alliance, tier, lane, rng);
+      const autoPath = validateAndFixAutoPath(rawAutoPath, lane);
       const pings    = generatePings(alliance, tier, pit, preferences, rng);
       // Pass pings so traversal timestamps can anchor to nearby bump/trench pings
       const timeline = generateTimeline(pit, preferences, pings, rng);
 
       // Climb result
       let tower_level = "none";
-      if (pit.climbTeleop === "L3" && rng.bool(0.8)) tower_level = "L3";
-      else if (pit.climbTeleop === "L2" && rng.bool(0.75)) tower_level = "L2";
-      else if (pit.climbTeleop === "L1" && rng.bool(0.7)) tower_level = "L1";
+      if (pit.climbTeleop?.includes("L3") && rng.bool(0.8)) tower_level = "L3";
+      else if (pit.climbTeleop?.includes("L2") && rng.bool(0.75)) tower_level = "L2";
+      else if (pit.climbTeleop?.includes("L1") && rng.bool(0.7)) tower_level = "L1";
+
+      // P4 context impact: pressure and defense intensity reduce performance variably
+      const laneConflictCount = Object.entries(laneMap)
+        .filter(([tk, ln]) => tk !== teamKey && ln === lane && (match.red.includes(tk) === match.red.includes(teamKey)))
+        .length;
+      const laneConflict = Math.min(1, laneConflictCount / 2);
+      const ctx = {
+        pressure: clamp(matchCtx.pressure + laneConflict * 0.14 + (pit.defense === "Ana Strateji" ? -0.06 : 0), 0.03, 0.98),
+        defenseIntensity: matchCtx.defenseIntensity,
+      };
+      const autoFuelBase = Math.max(0, Math.round(rng.gauss(pit.autoFuel || 0, 3)));
+      const teleActiveBase = Math.max(0, Math.round(rng.gauss((pit.teleopFuel || 0) * 0.7, 5)));
+      const teleInactBase = Math.max(0, Math.round(rng.gauss((pit.teleopFuel || 0) * 0.3, 3)));
+      const autoFuel = contextAdjustedFuel(autoFuelBase, tier, { ...ctx, pressure: ctx.pressure * 0.72 }, rng);
+      const teleActive = contextAdjustedFuel(teleActiveBase, tier, ctx, rng);
+      const teleInactive = Math.max(0, teleInactBase + Math.round((matchCtx.pressure - 0.45) * 3));
 
       const report = {
         event_key:   EVENT_KEY,
@@ -433,9 +598,9 @@ async function generateRegional(onProgress) {
         team_key:    teamKey,
         scout_device_id: seats[ri],
         auto_path_points: autoPath,
-        auto_fuel_scored: Math.max(0, Math.round(rng.gauss(pit.autoFuel || 0, 3))),
-        teleop_fuel_scored_active:   Math.max(0, Math.round(rng.gauss((pit.teleopFuel || 0) * 0.7, 5))),
-        teleop_fuel_scored_inactive: Math.max(0, Math.round(rng.gauss((pit.teleopFuel || 0) * 0.3, 3))),
+        auto_fuel_scored: autoFuel,
+        teleop_fuel_scored_active: teleActive,
+        teleop_fuel_scored_inactive: teleInactive,
         hub_state_samples: [],
         bump_slow_or_stuck:   pit.bump   && timeline.some(e => e.action === "traversal" && e.key === "bump"),
         trench_slow_or_stuck: pit.trench && timeline.some(e => e.action === "traversal" && e.key === "trench"),
@@ -443,27 +608,29 @@ async function generateRegional(onProgress) {
         teleop_shoot_timestamps_ms: [],
         location_pings: pings,
         timeline,
-        notes: rng.bool(0.25) ? rng.pick([
+        problems: timeline.filter((e) => e.action === "problem").map((e) => e.key),
+        notes: rng.bool(0.28) ? rng.pick([
           "İyi bir maç oynadı.",
           "Otonom tutarlıydı.",
           "Bump geçişi hızlıydı.",
           "Endgame'de sıkıştı.",
           "Defans robotunu engelledi.",
           "COMMS sorunu yaşadı ama toparladı.",
+          `Maç baskısı ${Math.round(matchCtx.pressure * 100)}%, lane ${lane.toUpperCase()} yoğunluğu ${laneConflictCount}.`,
         ]) : "",
       };
 
       await saveReport(report);
       saved++;
     }
-    onProgress(`Saha raporları: ${saved}/${PLAYED_QUAL * 6}…`);
+    onProgress(`Saha raporları: ${saved}/${playedQual * 6}…`);
   }
 
   // 4. Set event key in admin config
   const cfg = getAdminConfig();
   setAdminConfig({ ...cfg, eventKey: EVENT_KEY, myTeam: "frc9029" });
 
-  return { teams: TEAMS.length, quals: TOTAL_QUAL, played: PLAYED_QUAL, reports: saved };
+  return { teams: TEAMS.length, quals: totalQual, played: playedQual, reports: saved, seed: config.seed };
 }
 
 // ─── COMPONENT ───────────────────────────────────────────────────────────────
@@ -472,6 +639,11 @@ export default function TestDataPanel() {
   const [progress, setProgress] = useState("");
   const [result,   setResult]   = useState(null);
   const [error,    setError]    = useState(null);
+  const [cfg, setCfg] = useState({
+    seed: RNG_SEED_DEFAULT,
+    totalQual: TOTAL_QUAL_DEFAULT,
+    playedQual: PLAYED_QUAL_DEFAULT,
+  });
 
   async function handleGenerate() {
     setStatus("running");
@@ -479,7 +651,12 @@ export default function TestDataPanel() {
     setResult(null);
     setError(null);
     try {
-      const res = await generateRegional((msg) => setProgress(msg));
+      const safeCfg = {
+        seed: Number(cfg.seed) || RNG_SEED_DEFAULT,
+        totalQual: Math.max(12, Math.min(120, Number(cfg.totalQual) || TOTAL_QUAL_DEFAULT)),
+        playedQual: Math.max(6, Math.min(Number(cfg.totalQual) || TOTAL_QUAL_DEFAULT, Number(cfg.playedQual) || PLAYED_QUAL_DEFAULT)),
+      };
+      const res = await generateRegional(safeCfg, (msg) => setProgress(msg));
       setResult(res);
       setStatus("done");
     } catch (err) {
@@ -509,6 +686,16 @@ export default function TestDataPanel() {
         </p>
       </div>
 
+      <details className="test-strategy-api" open style={{ marginBottom: "0.75rem" }}>
+        <summary className="test-arch-title" style={{ cursor: "pointer" }}>Backend strategy API (dev / Cypress)</summary>
+        <div style={{ marginTop: "0.5rem" }}>
+          <StrategyDashboard
+            ourData={{ epa: 30, shootDeltas: [9500, 9800], activeFuel: 4, hubState: "active" }}
+            opponentData={{ epa: 28, pings: [{ nearBump: true }], shootDeltas: [10000], activeFuel: 3 }}
+          />
+        </div>
+      </details>
+
       <div className="test-summary-cards">
         <div className="test-card">
           <span className="test-card-num">30</span>
@@ -526,6 +713,24 @@ export default function TestDataPanel() {
           <span className="test-card-num">180</span>
           <span className="test-card-lbl">Saha Raporu</span>
         </div>
+      </div>
+
+      <div className="test-config-grid">
+        <label className="test-config-item">
+          <span>Seed</span>
+          <input type="number" value={cfg.seed}
+            onChange={(e) => setCfg((p) => ({ ...p, seed: e.target.value }))} />
+        </label>
+        <label className="test-config-item">
+          <span>Toplam Qual</span>
+          <input type="number" min={12} max={120} value={cfg.totalQual}
+            onChange={(e) => setCfg((p) => ({ ...p, totalQual: e.target.value }))} />
+        </label>
+        <label className="test-config-item">
+          <span>Oynanmış Qual</span>
+          <input type="number" min={6} value={cfg.playedQual}
+            onChange={(e) => setCfg((p) => ({ ...p, playedQual: e.target.value }))} />
+        </label>
       </div>
 
       <div className="test-team-list">
@@ -561,7 +766,7 @@ export default function TestDataPanel() {
           <div className="test-result-icon">✅</div>
           <div>
             <strong>{result.teams} takım</strong> · <strong>{result.quals} qual</strong> ·{" "}
-            <strong>{result.reports} saha raporu</strong> başarıyla oluşturuldu.
+            <strong>{result.reports} saha raporu</strong> başarıyla oluşturuldu (seed: <code>{result.seed}</code>).
             <br />
             <span className="test-result-hint">
               Event key <code>2026test</code> set edildi. War Room → bir qual seç → Strateji Üret.

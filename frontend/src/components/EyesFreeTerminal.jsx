@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
 import { getEventKey } from "../adminConfig";
-import { fetchActiveQualification, fetchSchedule } from "../api";
+import { fetchActiveQualification, fetchSchedule, postScoutHeartbeat } from "../api";
+import { CW, CH, DEVICE_ID } from "../config";
 import { buildQrDataUrl } from "../qr";
 import { getOfflineReports, saveReport } from "../storage";
+import { syncReportsIfOnline } from "../sync";
+import { normalizeCoords } from "../utils/coords";
 
 // ─── TIMING ──────────────────────────────────────────────────────────────────
 // FRC 2026 REBUILT game manual (Table 6-2):
@@ -19,10 +22,6 @@ const TRANSITION_END_MS  = 30_000;   // TRANSITION SHIFT ends → SHIFT 1 begins
 const SHIFT_MS           = 25_000;   // duration of each SHIFT (1-4)
 const TELEOP_END_MS      = 130_000;  // SHIFT 4 ends → END GAME begins
 const MATCH_END_MS       = 160_000;  // END GAME ends
-
-// ─── CANVAS SIZE ─────────────────────────────────────────────────────────────
-const CW = 640;
-const CH = 320;
 
 // ─── FIELD ZONES — calibrated from real 2026 REBUILT field photo ─────────────
 // Blue alliance LEFT, Red alliance RIGHT. Canvas: 640×320.
@@ -274,8 +273,15 @@ function drawStar(ctx, cx, cy, color) {
 const PROBLEMS = [
   { key: "comms",    label: "COMMS"  },
   { key: "mech",     label: "MECH"   },
+  { key: "auto_fail", label: "OTO PROB" },
   { key: "stuck",    label: "STUCK"  },
   { key: "brownout", label: "BRNOUT" },
+];
+const MATCH_EVENTS = [
+  { key: "comms_lost", label: "Comms lost" },
+  { key: "defense_hit", label: "Defans aldı" },
+  { key: "stuck_press", label: "Stuck pressure" },
+  { key: "foul_pressure", label: "Foul pressure" },
 ];
 
 const TRAVERSALS = [
@@ -295,6 +301,9 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
 
   // Event from admin config
   const [eventKey, setEventKey] = useState(getEventKey);
+
+  // Seat override for retro scouting — null = use own seat from auth
+  const [seatOverride, setSeatOverride] = useState(null);
 
   const [activeQual,      setActiveQual]      = useState(null);
   const [schedule,        setSchedule]        = useState([]);   // qm-only entries {match_key, red, blue}
@@ -321,11 +330,15 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
 
   // Foul
   const [foulCount,    setFoulCount]    = useState(0);
-  const [showFoulNote, setShowFoulNote] = useState(false);
-  const [foulNote,     setFoulNote]     = useState("");
-
   // Post-match
-  const [postMatchData, setPostMatchData] = useState({ note: "" });
+  const [postMatchData, setPostMatchData] = useState({
+    note: "",
+    foulDetail: "",
+    commsDetail: "",
+    mechDetail: "",
+    autoFailDetail: "",
+    confidence: "medium",
+  });
 
   // Save hint — small bottom feedback bar {msg, id}
   const [saveHint,    setSaveHint]    = useState(null);
@@ -343,7 +356,9 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
   const [qr,         setQr]         = useState("");
 
   const seat          = auth?.seat || "";
-  const scoutAlliance = seat.startsWith("red") ? "red" : "blue";
+  // effectiveSeat: use seatOverride when retro-scouting a different robot slot
+  const effectiveSeat    = seatOverride || seat;
+  const scoutAlliance    = effectiveSeat.startsWith("red") ? "red" : "blue";
 
   // ── Effective match: manual override wins over TBA active-qual ────────────────
   const effectiveMatch = (() => {
@@ -352,7 +367,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
     return schedule.find(m => m.match_key === key)
         || { match_key: key, red: [], blue: [] };
   })();
-  const teamLabel = resolveSeatTeam(effectiveMatch, seat);
+  const teamLabel = resolveSeatTeam(effectiveMatch, effectiveSeat);
 
   const isRunning    = matchPhase === "running";
   const isAuto       = isRunning && elapsedMs < AUTO_MS;
@@ -404,17 +419,23 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  // ── Canvas sizing: fill wrapper exactly (no aspect-ratio math) ──────────────
+  // ── Canvas sizing: fit into wrapper while preserving 640:320 ratio ──────────
   useEffect(() => {
     const wrap   = wrapRef.current;
     const canvas = canvasRef.current;
     if (!wrap || !canvas) return;
     function syncSize() {
-      const w = wrap.clientWidth;
-      const h = wrap.clientHeight;
-      if (w > 0 && h > 0) {
-        canvas.style.width  = w + "px";
-        canvas.style.height = h + "px";
+      const pad = 20; // keep visible margins around field
+      const availW = Math.max(0, wrap.clientWidth  - pad * 2);
+      const availH = Math.max(0, wrap.clientHeight - pad * 2);
+      if (availW > 0 && availH > 0) {
+        const scale = Math.min(availW / CW, availH / CH, 1) * 0.9; // always fit, keep visible margins
+        const drawW = Math.floor(CW * scale);
+        const drawH = Math.floor(CH * scale);
+        canvas.style.width  = drawW + "px";
+        canvas.style.height = drawH + "px";
+        canvas.style.maxWidth = availW + "px";
+        canvas.style.maxHeight = availH + "px";
       }
     }
     syncSize();
@@ -540,13 +561,14 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
     setElapsedMs(0); setMatchPhase("idle");
     setAutoPath([]); setTimeline([]);
     setAutoWinner(null); setAutoWinnerLocked(false); setShowAutoWinner(false); setAutoSaved(false);
-    setFoulCount(0); setFoulNote(""); setShowFoulNote(false);
+    setFoulCount(0);
     setPingCountdown(0); lastPingTimeRef.current = null;
-    setPostMatchData({ note: "" });
+    setPostMatchData({ note: "", foulDetail: "", commsDetail: "", mechDetail: "", autoFailDetail: "", confidence: "medium" });
     setSyncStatus(""); setQr("");
     lastPingRef.current = null;
     dragRef.current = null;
     setQualNumOverride(null); // let TBA pick next match automatically
+    setSeatOverride(null);    // clear retro seat for next match
   }
 
   function pickAutoWinner(winner) {
@@ -621,19 +643,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
   function addFoul() {
     setFoulCount((v) => v + 1);
     addEvent({ t_ms: nowMs(), action: "foul", note: "" });
-    setShowFoulNote(true);
     flash("🟨 Faul kaydedildi");
-  }
-  function saveFoulNote() {
-    if (foulNote.trim()) {
-      setTimeline((prev) => {
-        const copy = [...prev];
-        const last = [...copy].reverse().find((e) => e.action === "foul");
-        if (last) last.note = foulNote;
-        return copy;
-      });
-    }
-    setFoulNote(""); setShowFoulNote(false);
   }
 
   // ── Problems ─────────────────────────────────────────────────────────────────
@@ -651,6 +661,13 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
     if (navigator.vibrate) navigator.vibrate(40);
     const label = TRAVERSALS.find(t => t.key === key)?.label ?? key.toUpperCase();
     flash(`🔀 ${label} geçişi kaydedildi`);
+  }
+  function logMatchEvent(key) {
+    if (!isRunning) return;
+    addEvent({ t_ms: nowMs(), action: "tag", key });
+    if (navigator.vibrate) navigator.vibrate(25);
+    const label = MATCH_EVENTS.find((t) => t.key === key)?.label || key;
+    flash(`🏷 ${label}`);
   }
 
   // ── Climb ────────────────────────────────────────────────────────────────────
@@ -670,11 +687,16 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
   async function submitPostMatch() {
     const climbs = timeline.filter((e) => e.action === "climb");
     const climb  = climbs.length ? climbs[climbs.length - 1].value : "none";
-    const report = toBackendReport({ eventKey, matchKey: effectiveMatch?.match_key || "unknown", teamKey: teamLabel, seat, autoPath, timeline, foulCount, postMatchData, climb });
+    const report = toBackendReport({ eventKey, matchKey: effectiveMatch?.match_key || "unknown", teamKey: teamLabel, seat: effectiveSeat, autoPath, timeline, foulCount, postMatchData, climb });
     // Normalise pixel-space coords to 0-1 for consistent analytics consumption
-    const normPath     = autoPath.map(p => ({ ...p, x: p.x / CW, y: p.y / CH }));
-    const normTimeline = timeline.map(ev =>
-      ev.action === "ping" ? { ...ev, x: ev.x / CW, y: ev.y / CH } : ev
+    const normPath = autoPath.map((p) => {
+      const { x, y } = normalizeCoords(p.x, p.y, CW, CH);
+      return { ...p, x, y };
+    });
+    const normTimeline = timeline.map((ev) =>
+      ev.action === "ping" && ev.x != null && ev.y != null
+        ? { ...ev, ...normalizeCoords(ev.x, ev.y, CW, CH) }
+        : ev
     );
     // Normalise tower_level to "L1"/"L2"/"L3" for teamAnalytics compatibility
     const normTowerLevel = (report.tower_level || "none")
@@ -683,17 +705,17 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
       ...report,
       auto_path_points: normPath,
       timeline: normTimeline,
-      location_pings: report.location_pings.map(p => ({ ...p, x: p.x / CW, y: p.y / CH })),
+      location_pings: report.location_pings.map((p) => ({ ...p, ...normalizeCoords(p.x, p.y, CW, CH) })),
       tower_level: normTowerLevel,
+      scout_confidence: postMatchData.confidence || "medium",
     });
     if (navigator.onLine) {
       try {
-        const r = await fetch("http://localhost:8001/sync/upload", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ device_id: `seat-${seat}`, reports: [report] }),
-        });
-        setSyncStatus(r.ok ? "✓ Veri gönderildi." : "✗ Gönderim başarısız.");
-      } catch { setSyncStatus("✗ Bağlantı yok."); }
+        const { synced } = await syncReportsIfOnline(DEVICE_ID);
+        setSyncStatus(synced > 0 ? "✓ Veri gönderildi." : "✓ Kaydedildi (kuyruk/sync durumuna bakın).");
+      } catch {
+        setSyncStatus("✗ Gönderim başarısız.");
+      }
     } else {
       const reports = await getOfflineReports();
       setQr(await buildQrDataUrl({ reports }));
@@ -714,12 +736,16 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
 
   if (matchPhase === "idle") return (
     <ReadyScreen
-      seat={seat} teamLabel={teamLabel}
+      seat={seat} effectiveSeat={effectiveSeat} teamLabel={teamLabel}
       matchKey={effectiveMatch?.match_key}
+      matchRosterRed={effectiveMatch?.red || []}
+      matchRosterBlue={effectiveMatch?.blue || []}
       eventKey={eventKey}
       schedule={schedule}
       qualNumOverride={qualNumOverride}
       onQualChange={setQualNumOverride}
+      seatOverride={seatOverride}
+      onSeatOverride={setSeatOverride}
       scoutName={scoutName}
       isRetro={Boolean(initialMatchKey)}
       onStart={startMatch} onLogout={logout} />
@@ -738,13 +764,24 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
                    : isTeleop       ? "#38bdf8"
                    : "#f97316";
 
+  const guardrails = (() => {
+    const pings = timeline.filter((e) => e.action === "ping").length;
+    const autoFail = timeline.some((e) => e.action === "problem" && e.key === "auto_fail");
+    const problems = timeline.filter((e) => e.action === "problem").length;
+    const warnings = [];
+    if (pings === 0) warnings.push("Hiç ping yok");
+    if (!autoSaved && !autoFail) warnings.push("Oto kaydı yok");
+    if (problems > 0 && !postMatchData.note?.trim()) warnings.push("Problem var ama genel not boş");
+    return warnings;
+  })();
+
   return (
     <div className="ef-root">
       {/* STATUS BAR */}
       <div className="ef-statusbar">
         <span className="ef-timer">{secsLeft}s</span>
         <span className="ef-phase" style={{ color: phaseColor }}>{phaseLabel}</span>
-        <span className={`ef-hub ${hubState}`}>HUB {hubState === "active" ? "ON" : "OFF"}</span>
+        <span className={`ef-hub ${hubState}`} data-cy="hub-live">HUB {hubState === "active" ? "ON" : "OFF"}</span>
         <span className="ef-seat">{scoutName}</span>
       </div>
 
@@ -753,19 +790,9 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
         <div className="ef-overlay">
           <p>OTO KİM KAZANDI?</p>
           <div className="ef-auto-winner-row">
-            <button className="btn-red-win"  onClick={() => pickAutoWinner("red")}>RED</button>
-            <button className="btn-blue-win" onClick={() => pickAutoWinner("blue")}>BLUE</button>
+            <button type="button" className="btn-red-win" data-cy="auto-winner-red" onClick={() => pickAutoWinner("red")}>RED</button>
+            <button type="button" className="btn-blue-win" data-cy="auto-winner-blue" onClick={() => pickAutoWinner("blue")}>BLUE</button>
           </div>
-        </div>
-      )}
-
-      {/* FOUL NOTE OVERLAY */}
-      {showFoulNote && (
-        <div className="ef-overlay">
-          <p>Foul sebebi:</p>
-          <input autoFocus value={foulNote} onChange={(e) => setFoulNote(e.target.value)}
-            placeholder="G12, contact vs." onKeyDown={(e) => e.key === "Enter" && saveFoulNote()} />
-          <button onClick={saveFoulNote}>KAYDET</button>
         </div>
       )}
 
@@ -781,6 +808,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
       {isAuto && (
         <div className="ef-auto-hint-bar">
           <span className="ef-hint">✏️ Sahaya dokun → nokta koy · {Math.max(0, Math.ceil((AUTO_MS - elapsedMs)/1000))}s</span>
+          <button className="ef-issue-sm" onClick={() => logProblem("auto_fail")}>OTO PROBLEM</button>
           <button className="ef-undo-btn" onClick={undoAutoPath} disabled={autoPath.length === 0}>↩ Geri Al</button>
         </div>
       )}
@@ -788,7 +816,7 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
         <div className="ef-auto-review-bar">
           <span className="ef-ar-hint">Noktaları sürükle &amp; düzenle</span>
           <button className="ef-undo-btn" onClick={undoAutoPath} disabled={autoPath.length === 0}>↩ Geri Al</button>
-          <button className="ef-ar-save-btn" onClick={saveAuto}>OTO KAYDET →</button>
+          <button type="button" className="ef-ar-save-btn" data-cy="auto-save" onClick={saveAuto}>OTO KAYDET →</button>
         </div>
       )}
       {(isTransition || isTeleop) && (
@@ -816,11 +844,29 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
       {(isTransition || isTeleop || isEndgame) && (
         <div className="ef-issue-row">
           {PROBLEMS.map((p) => (
-            <button key={p.key} className="ef-issue-sm" onClick={() => logProblem(p.key)}>{p.label}</button>
+            <button
+              key={p.key}
+              className="ef-issue-sm"
+              onClick={() => logProblem(p.key)}
+            >
+              {p.label}
+            </button>
           ))}
           <button className="ef-foul-sm" onClick={addFoul}>
             FOUL{foulCount > 0 ? ` ×${foulCount}` : ""}
           </button>
+        </div>
+      )}
+      {(isTransition || isTeleop || isEndgame) && (
+        <div className="ef-event-row">
+          {MATCH_EVENTS.map((ev) => {
+            const count = timeline.filter((e) => e.action === "tag" && e.key === ev.key).length;
+            return (
+              <button key={ev.key} className="ef-event-btn" onClick={() => logMatchEvent(ev.key)}>
+                {ev.label}{count > 0 ? ` ×${count}` : ""}
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -851,8 +897,18 @@ export default function EyesFreeTerminal({ auth, onLogout, onTimelineUpdate, ini
 
 function PostMatchScreen({ postMatchData, setPostMatchData, foulCount, timeline, onSubmit }) {
   const problems    = timeline.filter((e) => e.action === "problem");
+  const mechProblems = problems.filter((e) => e.key === "mech");
+  const commsProblems = problems.filter((e) => e.key === "comms");
+  const autoFailProblems = problems.filter((e) => e.key === "auto_fail");
+  const quickTags = timeline.filter((e) => e.action === "tag").map((e) => e.key);
   const trenchCount = timeline.filter((e) => e.action === "traversal" && e.key === "trench").length;
   const bumpCount     = timeline.filter((e) => e.action === "traversal" && e.key === "bump").length;
+  const warnings = [];
+  if (timeline.filter((e) => e.action === "ping").length === 0) warnings.push("Hiç ping yok");
+  if (autoFailProblems.length === 0 && timeline.filter((e) => e.action === "problem" && e.key === "auto_fail").length === 0) {
+    const hasAutoPath = timeline.some((e) => e.action === "ping" && e.t_ms <= 20000);
+    if (!hasAutoPath) warnings.push("Oto kaydı zayıf/eksik");
+  }
   return (
     <div className="ef-postmatch">
       <h2>POST-MATCH NOTLAR</h2>
@@ -862,10 +918,65 @@ function PostMatchScreen({ postMatchData, setPostMatchData, foulCount, timeline,
         <div className="ef-pm-stat"><span>{trenchCount}</span><label>TRENCH</label></div>
         <div className="ef-pm-stat"><span>{bumpCount}</span><label>BUMP</label></div>
       </div>
+      {warnings.length > 0 && (
+        <div className="ef-guardrail-warn">⚠ Guardrail: {warnings.join(" · ")}</div>
+      )}
+      {quickTags.length > 0 && (
+        <>
+          <p className="ef-pm-section">Maç olayları:</p>
+          <div className="ef-pm-tags">{[...new Set(quickTags)].map((t) => <span key={t} className="ef-pm-tag">{t}</span>)}</div>
+        </>
+      )}
       <p className="ef-pm-section">Genel not:</p>
       <textarea rows={4} placeholder="Dikkat çeken? Hız, strateji, zayıf nokta..."
         value={postMatchData.note}
         onChange={(e) => setPostMatchData((p) => ({ ...p, note: e.target.value }))} />
+      {foulCount > 0 && (
+        <>
+          <p className="ef-pm-section">FOUL sebebi detay:</p>
+          <textarea rows={2} placeholder="Örn: G12 contact, lane block, pin sayısı..."
+            value={postMatchData.foulDetail || ""}
+            onChange={(e) => setPostMatchData((p) => ({ ...p, foulDetail: e.target.value }))} />
+        </>
+      )}
+      {commsProblems.length > 0 && (
+        <>
+          <p className="ef-pm-section">COMMS detay (maç sonu netleştir):</p>
+          <textarea rows={2} placeholder="Örn: robot 2 kez kendi kendine durdu, DS link dalgalandı..."
+            value={postMatchData.commsDetail || ""}
+            onChange={(e) => setPostMatchData((p) => ({ ...p, commsDetail: e.target.value }))} />
+        </>
+      )}
+      {mechProblems.length > 0 && (
+        <>
+          <p className="ef-pm-section">MECH detay (maç sonu netleştir):</p>
+          <textarea rows={2} placeholder="Örn: intake zinciri attı, bumper gevşedi, turret jam oldu..."
+            value={postMatchData.mechDetail || ""}
+            onChange={(e) => setPostMatchData((p) => ({ ...p, mechDetail: e.target.value }))} />
+        </>
+      )}
+      {autoFailProblems.length > 0 && (
+        <>
+          <p className="ef-pm-section">OTO problem detay:</p>
+          <textarea rows={2} placeholder="Örn: ilk waypointte çarptı, gyro reset yüzünden rota bozuldu..."
+            value={postMatchData.autoFailDetail || ""}
+            onChange={(e) => setPostMatchData((p) => ({ ...p, autoFailDetail: e.target.value }))} />
+        </>
+      )}
+      <p className="ef-pm-section">Confidence (bu rapora ne kadar eminsin?):</p>
+      <div className="ef-pm-confidence">
+        {[
+          { key: "low", label: "Emin Değilim" },
+          { key: "medium", label: "Orta Emin" },
+          { key: "high", label: "Eminim" },
+        ].map((c) => (
+          <button key={c.key}
+            className={`ef-pm-conf-btn ${postMatchData.confidence === c.key ? "active" : ""}`}
+            onClick={() => setPostMatchData((p) => ({ ...p, confidence: c.key }))}>
+            {c.label}
+          </button>
+        ))}
+      </div>
       <button className="ef-start-btn" onClick={onSubmit}>VERİYİ GÖNDER</button>
     </div>
   );
@@ -882,11 +993,31 @@ function DoneScreen({ syncStatus, qr, onNext }) {
   );
 }
 
-function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOverride, onQualChange,
-                        scoutName, isRetro, onStart, onLogout }) {
+const ALL_SEATS = ["red1","red2","red3","blue1","blue2","blue3"];
+
+function ReadyScreen({ seat, effectiveSeat, teamLabel, matchKey, matchRosterRed, matchRosterBlue,
+                       eventKey, schedule, qualNumOverride, onQualChange,
+                       seatOverride, onSeatOverride,
+                       scoutName, isRetro, onStart, onLogout }) {
   const qualNum = matchKey ? parseInt(matchKey.split("_qm")[1]) : null;
   const isOverridden = qualNumOverride != null;
   const [inputVal, setInputVal] = useState(qualNum != null ? String(qualNum) : "");
+  const [showSeatPicker, setShowSeatPicker] = useState(isRetro || false);
+  const [activeScouts, setActiveScouts] = useState([]);
+
+  // Polling heartbeat
+  useEffect(() => {
+    let active = true;
+    let timeout;
+    const poll = async () => {
+      const ms = matchKey || "none";
+      const list = await postScoutHeartbeat(DEVICE_ID, { scout_name: scoutName, match_key: ms, seat: effectiveSeat });
+      if (active) setActiveScouts(list);
+      timeout = setTimeout(poll, 2500);
+    };
+    poll();
+    return () => { active = false; clearTimeout(timeout); };
+  }, [scoutName, matchKey, effectiveSeat]);
 
   // Keep input in sync when TBA updates activeQual
   useEffect(() => {
@@ -897,6 +1028,20 @@ function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOve
     const n = parseInt(raw);
     if (!isNaN(n) && n >= 1) onQualChange(n);
     else if (raw === "") onQualChange(null);
+  }
+
+  // Active scouts display logic
+  const others = activeScouts.filter(s => s.device_id !== DEVICE_ID);
+  const reqMatch = matchKey || "none";
+  const conflicts = others.filter(o => o.match_key === reqMatch && o.seat === effectiveSeat && reqMatch !== "none");
+
+  // Resolve team key for each slot to show in picker
+  function teamForSeat(s) {
+    const isRed = s.startsWith("red");
+    const idx = parseInt(s.slice(-1)) - 1;
+    const roster = isRed ? (matchRosterRed || []) : (matchRosterBlue || []);
+    const tk = roster[idx];
+    return tk ? tk.replace("frc","") : "?";
   }
 
   return (
@@ -914,8 +1059,50 @@ function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOve
         <span className="ef-scout-seat">{seat.toUpperCase()}</span>
       </div>
 
-      <div className="ef-ready-seat">{seat.toUpperCase()}</div>
-      <div className="ef-ready-team">TEAM {teamLabel}</div>
+      {/* Retro seat picker toggle */}
+      <div className="ef-retro-row">
+        <button
+          className={`ef-retro-toggle ${showSeatPicker ? "active" : ""}`}
+          onClick={() => {
+            setShowSeatPicker(v => !v);
+            if (showSeatPicker) onSeatOverride(null); // close → reset
+          }}
+        >
+          🔁 Geriye Dönük Scout
+        </button>
+        {seatOverride && (
+          <span className="ef-retro-active-badge">
+            {seatOverride.toUpperCase()} · #{teamForSeat(seatOverride)}
+          </span>
+        )}
+      </div>
+
+      {/* Robot position grid */}
+      {showSeatPicker && (
+        <div className="ef-retro-seat-grid">
+          <p className="ef-retro-hint">Hangi robot pozisyonunu scoutluyorsun?</p>
+          <div className="ef-retro-slots">
+            {ALL_SEATS.map(s => {
+              const isRed = s.startsWith("red");
+              const teamNo = teamForSeat(s);
+              const isSelected = (seatOverride || seat) === s;
+              return (
+                <button
+                  key={s}
+                  className={`ef-retro-slot ${isRed ? "slot-red" : "slot-blue"} ${isSelected ? "slot-sel" : ""}`}
+                  onClick={() => onSeatOverride(s === seat ? null : s)}
+                >
+                  <span className="slot-pos">{s.replace("red","R").replace("blue","M")}</span>
+                  <span className="slot-team">#{teamNo}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="ef-ready-seat">{effectiveSeat.toUpperCase()}{seatOverride ? " ⬅ GERİDÖNÜK" : ""}</div>
+      <div className="ef-ready-team" data-cy="ready-label">TEAM {teamLabel}</div>
 
       {/* Qual number stepper */}
       <div className="ef-qual-stepper">
@@ -950,6 +1137,29 @@ function ReadyScreen({ seat, teamLabel, matchKey, eventKey, schedule, qualNumOve
       <div className="ef-ready-event">{eventKey}</div>
 
       <button data-cy="start-match" className="ef-start-btn" onClick={onStart}>MATCH START</button>
+      
+      {/* Active Scouts and Conflicts UI */}
+      <div className="ef-active-scouts">
+        {conflicts.length > 0 && (
+          <div className="ef-conflict-warn">
+            ⚠️ ÇAKIŞMA: <strong>{conflicts.map(c => c.scout_name).join(", ")}</strong> şu an seninle aynı takımı izlemek için bekliyor! Başka bir robot pozisyonu seç.
+          </div>
+        )}
+        {others.length > 0 && (
+          <div className="ef-scout-list">
+            <span className="ef-scout-list-title">Diğer Bekleyenler:</span>
+            {others.map(o => {
+              const qm = o.match_key !== "none" ? `Q${o.match_key.split("_qm")[1]}` : "Boşta";
+              return (
+                <span key={o.device_id} className={`ef-scout-pill ${o.seat.startsWith("red") ? "pill-red" : "pill-blue"}`}>
+                  {o.scout_name} · {qm} {o.seat.replace("red","R").replace("blue","M")}
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       <button className="ef-logout-btn" onClick={onLogout}>Çıkış yap</button>
     </div>
   );
@@ -987,7 +1197,18 @@ function toBackendReport({ eventKey, matchKey, teamKey, seat, autoPath, timeline
   const pings = timeline.filter((e) => e.action === "ping");
   const usedBump    = timeline.some((e) => e.action === "traversal" && e.key === "bump");
   const usedTrench  = timeline.some((e) => e.action === "traversal" && e.key === "trench");
-  const notes       = [postMatchData.note].filter(Boolean).join("; ");
+  const notes = [
+    postMatchData.note,
+    postMatchData.confidence ? `Confidence: ${postMatchData.confidence}` : "",
+    postMatchData.foulDetail ? `FOUL detay: ${postMatchData.foulDetail}` : "",
+    postMatchData.mechDetail ? `MECH detay: ${postMatchData.mechDetail}` : "",
+    postMatchData.commsDetail ? `COMMS detay: ${postMatchData.commsDetail}` : "",
+    postMatchData.autoFailDetail ? `OTO problem detay: ${postMatchData.autoFailDetail}` : "",
+    (() => {
+      const tags = timeline.filter((e) => e.action === "tag").map((e) => e.key);
+      return tags.length ? `Olaylar: ${[...new Set(tags)].join(", ")}` : "";
+    })(),
+  ].filter(Boolean).join("; ");
   return {
     event_key: eventKey, match_key: matchKey, team_key: teamKey,
     scout_device_id: `seat-${seat}`,
