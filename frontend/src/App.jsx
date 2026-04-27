@@ -11,8 +11,8 @@ import {
   validateLogin,
   getAdminCredential,
   FIELD_SEATS, getSeatAssignments, isFreshSeat,
-  getNextAvailableSeat, claimSeat, releaseSeat,
-  getRoleSessions, joinRoleSession, leaveRoleSession,
+  getNextAvailableSeat, claimSeatShared, releaseSeatShared, getSeatAssignmentsShared,
+  getRoleSessions, joinRoleSessionShared, leaveRoleSessionShared, getRoleSessionsShared,
 } from "./adminConfig";
 import { syncReportsIfOnline } from "./sync";
 import QrImportModal from "./components/QrImportModal";
@@ -68,12 +68,20 @@ function LoginScreen({ onLogin }) {
     setAssignments(getSeatAssignments());
     setPitSessions(getRoleSessions("pit_scout"));
     setVideoSessions(getRoleSessions("video_scout"));
+    const refresh = async () => {
+      setAssignments(await getSeatAssignmentsShared());
+      setPitSessions(await getRoleSessionsShared("pit_scout"));
+      setVideoSessions(await getRoleSessionsShared("video_scout"));
+    };
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    return () => clearInterval(timer);
   }, []);
 
-  function fieldLogin() {
+  async function fieldLogin() {
     const name = crewName.trim();
     if (!name || !selectedSeat) return;
-    claimSeat(selectedSeat, name);
+    await claimSeatShared(selectedSeat, name);
     onLogin({
       username:  selectedSeat,
       seat:      selectedSeat,
@@ -82,10 +90,10 @@ function LoginScreen({ onLogin }) {
       seatIndex: FIELD_SEATS.indexOf(selectedSeat),
     });
   }
-  function pitLogin() {
+  async function pitLogin() {
     const name = crewName.trim();
     if (!name) { setErr("Önce ismini yaz."); return; }
-    const res = joinRoleSession("pit_scout", name, 5, "pit");
+    const res = await joinRoleSessionShared("pit_scout", name, 5, "pit");
     if (!res.ok) {
       setErr(res.error === "FULL" ? "Pit dolu (maks 5 kişi)." : "Pit girişi başarısız.");
       return;
@@ -99,10 +107,10 @@ function LoginScreen({ onLogin }) {
       sessionId: res.session.id,
     });
   }
-  function videoLogin() {
+  async function videoLogin() {
     const name = crewName.trim();
     if (!name) { setErr("Önce ismini yaz."); return; }
-    const res = joinRoleSession("video_scout", name, 50, "video");
+    const res = await joinRoleSessionShared("video_scout", name, 50, "video");
     if (!res.ok) { setErr("Video girişi başarısız."); return; }
     onLogin({
       username: `video_${res.session.id}`,
@@ -316,10 +324,10 @@ export default function App() {
   function logout() {
     // Release field scout seat reservation
     if (auth?.role === "field_scout" && auth?.seat) {
-      releaseSeat(auth.seat);
+      releaseSeatShared(auth.seat);
     }
     if ((auth?.role === "pit_scout" || auth?.role === "video_scout") && auth?.sessionId) {
-      leaveRoleSession(auth.role, auth.sessionId);
+      leaveRoleSessionShared(auth.role, auth.sessionId);
     }
     sessionStorage.removeItem(SESSION_KEY);
     setAuth(null);

@@ -1,3 +1,5 @@
+import { API_BASE } from "./config";
+
 const KEY = "adminConfig";
 
 const DEFAULTS = {
@@ -66,6 +68,18 @@ export function getSeatAssignments() {
   catch { return {}; }
 }
 
+export async function getSeatAssignmentsShared() {
+  try {
+    const res = await fetch(`${API_BASE}/presence/field-seats`);
+    if (!res.ok) throw new Error("presence fetch failed");
+    const data = await res.json();
+    localStorage.setItem(SEAT_LS, JSON.stringify(data || {}));
+    return data || {};
+  } catch {
+    return getSeatAssignments();
+  }
+}
+
 /** True if an assignment exists and is younger than 12 h. */
 export function isFreshSeat(assignment) {
   return Boolean(assignment && (Date.now() - (assignment.ts || 0)) < SEAT_EXPIRY_MS);
@@ -78,11 +92,33 @@ export function claimSeat(seat, name) {
   localStorage.setItem(SEAT_LS, JSON.stringify(prev));
 }
 
+export async function claimSeatShared(seat, name) {
+  claimSeat(seat, name); // optimistic local update
+  try {
+    await fetch(`${API_BASE}/presence/field-seats/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat, name }),
+    });
+  } catch {}
+}
+
 /** Release a seat (called on logout). */
 export function releaseSeat(seat) {
   const prev = getSeatAssignments();
   delete prev[seat];
   localStorage.setItem(SEAT_LS, JSON.stringify(prev));
+}
+
+export async function releaseSeatShared(seat) {
+  releaseSeat(seat); // optimistic local update
+  try {
+    await fetch(`${API_BASE}/presence/field-seats/release`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat }),
+    });
+  } catch {}
 }
 
 /** Returns the first seat without a fresh assignment (auto-suggest). */
@@ -117,6 +153,20 @@ export function getRoleSessions(role) {
   return [...(all[role] || [])].sort((a, b) => (a.ts || 0) - (b.ts || 0));
 }
 
+export async function getRoleSessionsShared(role) {
+  try {
+    const res = await fetch(`${API_BASE}/presence/role-sessions/${encodeURIComponent(role)}`);
+    if (!res.ok) throw new Error("presence fetch failed");
+    const list = await res.json();
+    const all = getAllRoleSessions();
+    all[role] = list || [];
+    saveAllRoleSessions(all);
+    return [...(list || [])].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  } catch {
+    return getRoleSessions(role);
+  }
+}
+
 /**
  * Join a role queue by name.
  * - role: "pit_scout" | "video_scout"
@@ -139,12 +189,42 @@ export function joinRoleSession(role, name, maxCount = Infinity, seatPrefix = "r
   return { ok: true, session: sess, count: list.length };
 }
 
+export async function joinRoleSessionShared(role, name, maxCount = Infinity, seatPrefix = "role") {
+  const optimistic = joinRoleSession(role, name, maxCount, seatPrefix);
+  if (!optimistic.ok) return optimistic;
+  try {
+    const res = await fetch(`${API_BASE}/presence/role-sessions/${encodeURIComponent(role)}/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, maxCount, seatPrefix }),
+    });
+    if (res.status === 409) return { ok: false, error: "FULL" };
+    if (!res.ok) throw new Error("join failed");
+    const data = await res.json();
+    const session = data.session || optimistic.session;
+    return { ok: true, session, count: data.count ?? optimistic.count };
+  } catch {
+    return optimistic;
+  }
+}
+
 /** Leave role queue by session id. */
 export function leaveRoleSession(role, sessionId) {
   const all = getAllRoleSessions();
   const list = (all[role] || []).filter((s) => s.id !== sessionId);
   all[role] = list;
   saveAllRoleSessions(all);
+}
+
+export async function leaveRoleSessionShared(role, sessionId) {
+  leaveRoleSession(role, sessionId); // optimistic local update
+  try {
+    await fetch(`${API_BASE}/presence/role-sessions/${encodeURIComponent(role)}/leave`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+  } catch {}
 }
 
 // ─── CREDENTIALS (pit / video / admin only) ───────────────────────────────────

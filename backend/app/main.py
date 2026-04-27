@@ -74,6 +74,27 @@ SEAT_ASSIGNMENTS = {
 
 ACTIVE_SCOUTS: dict[str, dict] = {}
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+PRESENCE_TTL_MS = 12 * 60 * 60 * 1000
+FIELD_SEAT_ORDER = ["red1", "red2", "red3", "blue1", "blue2", "blue3"]
+FIELD_SEAT_ASSIGNMENTS: dict[str, dict] = {}
+ROLE_SESSIONS: dict[str, list[dict]] = {"pit_scout": [], "video_scout": []}
+
+
+def _is_fresh_ts(ts: int | float | None) -> bool:
+    if ts is None:
+        return False
+    return (time() * 1000 - float(ts)) < PRESENCE_TTL_MS
+
+
+def _cleanup_presence() -> None:
+    global FIELD_SEAT_ASSIGNMENTS, ROLE_SESSIONS
+    FIELD_SEAT_ASSIGNMENTS = {
+        seat: v for seat, v in FIELD_SEAT_ASSIGNMENTS.items() if _is_fresh_ts(v.get("ts"))
+    }
+    cleaned: dict[str, list[dict]] = {}
+    for role, sessions in ROLE_SESSIONS.items():
+        cleaned[role] = [s for s in sessions if _is_fresh_ts(s.get("ts"))]
+    ROLE_SESSIONS = cleaned
 
 
 @app.get("/health")
@@ -106,6 +127,76 @@ def heartbeat_scout_status(payload: ScoutStatusIn, device_id: str = Query(...)):
         del ACTIVE_SCOUTS[k]
         
     return [ScoutStatusOut(**s) for s in ACTIVE_SCOUTS.values()]
+
+
+@app.get("/presence/field-seats")
+def presence_field_seats() -> dict[str, dict]:
+    _cleanup_presence()
+    return FIELD_SEAT_ASSIGNMENTS
+
+
+@app.post("/presence/field-seats/claim")
+def presence_claim_field_seat(payload: dict) -> dict:
+    seat = str(payload.get("seat") or "").strip().lower()
+    name = str(payload.get("name") or "").strip()
+    if seat not in FIELD_SEAT_ORDER:
+        raise HTTPException(status_code=400, detail="INVALID_SEAT")
+    if not name:
+        raise HTTPException(status_code=400, detail="EMPTY_NAME")
+    FIELD_SEAT_ASSIGNMENTS[seat] = {"name": name, "ts": int(time() * 1000)}
+    _cleanup_presence()
+    return {"ok": True}
+
+
+@app.post("/presence/field-seats/release")
+def presence_release_field_seat(payload: dict) -> dict:
+    seat = str(payload.get("seat") or "").strip().lower()
+    if seat in FIELD_SEAT_ASSIGNMENTS:
+        del FIELD_SEAT_ASSIGNMENTS[seat]
+    return {"ok": True}
+
+
+@app.get("/presence/role-sessions/{role}")
+def presence_role_sessions(role: str) -> list[dict]:
+    _cleanup_presence()
+    return sorted(ROLE_SESSIONS.get(role, []), key=lambda s: s.get("ts", 0))
+
+
+@app.post("/presence/role-sessions/{role}/join")
+def presence_role_join(role: str, payload: dict) -> dict:
+    name = str(payload.get("name") or "").strip()
+    max_count = int(payload.get("maxCount") or 9999)
+    seat_prefix = str(payload.get("seatPrefix") or "role").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="EMPTY_NAME")
+    if role not in ROLE_SESSIONS:
+        ROLE_SESSIONS[role] = []
+    _cleanup_presence()
+    sessions = sorted(ROLE_SESSIONS[role], key=lambda s: s.get("ts", 0))
+    if len(sessions) >= max_count:
+        raise HTTPException(status_code=409, detail="FULL")
+    used = {s.get("seat") for s in sessions}
+    idx = 1
+    while f"{seat_prefix}{idx}" in used:
+        idx += 1
+    sess = {
+        "id": f"{int(time() * 1000)}-{os.urandom(3).hex()}",
+        "name": name,
+        "seat": f"{seat_prefix}{idx}",
+        "ts": int(time() * 1000),
+    }
+    sessions.append(sess)
+    ROLE_SESSIONS[role] = sessions
+    return {"ok": True, "session": sess, "count": len(sessions)}
+
+
+@app.post("/presence/role-sessions/{role}/leave")
+def presence_role_leave(role: str, payload: dict) -> dict:
+    session_id = str(payload.get("sessionId") or "").strip()
+    if role not in ROLE_SESSIONS:
+        ROLE_SESSIONS[role] = []
+    ROLE_SESSIONS[role] = [s for s in ROLE_SESSIONS[role] if s.get("id") != session_id]
+    return {"ok": True}
 
 
 @app.get("/live/hub-state/current", response_model=HubStateResponse)
