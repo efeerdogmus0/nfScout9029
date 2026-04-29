@@ -1114,9 +1114,13 @@ function ReadyScreen({ seat, effectiveSeat, teamLabel, matchKey, matchRosterRed,
         <span className="ef-qs-label">QUAL</span>
         <input
           className="ef-qs-input"
-          type="number" min="1" inputMode="numeric"
+          type="text" inputMode="numeric" pattern="[0-9]*"
           value={inputVal}
-          onChange={(e) => { setInputVal(e.target.value); commitInput(e.target.value); }}
+          onChange={(e) => {
+            const next = e.target.value.replace(/[^\d]/g, "");
+            setInputVal(next);
+            commitInput(next);
+          }}
           onBlur={(e) => commitInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
         />
@@ -1125,9 +1129,14 @@ function ReadyScreen({ seat, effectiveSeat, teamLabel, matchKey, matchRosterRed,
           const next = cur + 1;
           setInputVal(String(next)); onQualChange(next);
         }}>+</button>
-        {isOverridden && (
-          <button className="ef-qs-reset" onClick={() => { onQualChange(null); setInputVal(qualNum != null ? String(qualNum) : ""); }} title="TBA'ya dön">↺ TBA</button>
-        )}
+        <button
+          className={`ef-qs-reset ${isOverridden ? "" : "is-hidden"}`}
+          onClick={() => { onQualChange(null); setInputVal(qualNum != null ? String(qualNum) : ""); }}
+          title="TBA'ya dön"
+          disabled={!isOverridden}
+        >
+          ↺ TBA
+        </button>
       </div>
 
       <div className="ef-ready-match">

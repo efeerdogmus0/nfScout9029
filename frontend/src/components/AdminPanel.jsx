@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   getAdminConfig, setAdminConfig,
   getPitCredentials, getPitScoutCount,
-  setScoutName, getScoutNames,
+  setScoutName, getScoutNames, setSharedEventKey, syncSharedEventKey,
 } from "../adminConfig";
 import { fetchEventTeams, fetchSchedule } from "../api";
 import { getOfflineReports, getOutboxMeta } from "../storage";
@@ -428,9 +428,15 @@ export default function AdminPanel() {
     return () => window.removeEventListener("adminConfigChanged", onCfg);
   }, []);
 
-  function selectEvent(key) {
+  useEffect(() => {
+    syncSharedEventKey();
+  }, []);
+
+  async function selectEvent(key) {
     const next = { ...config, eventKey: key };
-    setConfig(next); setAdminConfig(next); setSaved(true);
+    setConfig(next);
+    await setSharedEventKey(key);
+    setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   }
   function applyCustom() {

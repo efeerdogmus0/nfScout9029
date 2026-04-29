@@ -3,7 +3,7 @@ import { API_BASE } from "./config";
 const KEY = "adminConfig";
 
 const DEFAULTS = {
-  eventKey: "2026miket",
+  eventKey: "2026new",
   tbaKey: "",
   openrouterKey: "",
   openrouterModel: "",
@@ -51,6 +51,42 @@ export function tbaParams(extra = {}) {
   const params = new URLSearchParams(extra);
   if (key) params.set("tba_key", key);
   return params.toString() ? `?${params.toString()}` : "";
+}
+
+export async function setSharedEventKey(eventKey) {
+  const key = (eventKey || "").trim().toLowerCase();
+  const cfg = getAdminConfig();
+  const next = { ...cfg, eventKey: key || DEFAULTS.eventKey };
+  setAdminConfig(next);
+  try {
+    const res = await fetch(`${API_BASE}/config/admin/event-key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event_key: next.eventKey }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.event_key && data.event_key !== next.eventKey) {
+        setAdminConfig({ ...next, eventKey: data.event_key });
+      }
+    }
+  } catch {}
+}
+
+export async function syncSharedEventKey() {
+  try {
+    const res = await fetch(`${API_BASE}/config/admin`);
+    if (!res.ok) throw new Error("shared config fetch failed");
+    const data = await res.json();
+    const serverKey = (data?.event_key || DEFAULTS.eventKey).trim().toLowerCase();
+    const cfg = getAdminConfig();
+    if (serverKey && serverKey !== cfg.eventKey) {
+      setAdminConfig({ ...cfg, eventKey: serverKey });
+    }
+    return serverKey;
+  } catch {
+    return getEventKey();
+  }
 }
 
 // ─── FIELD SEAT ASSIGNMENT (replaces rotation system) ─────────────────────────

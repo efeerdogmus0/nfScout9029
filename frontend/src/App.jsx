@@ -12,7 +12,7 @@ import {
   getAdminCredential,
   FIELD_SEATS, getSeatAssignments, isFreshSeat,
   getNextAvailableSeat, claimSeatShared, releaseSeatShared, getSeatAssignmentsShared,
-  getRoleSessions, joinRoleSessionShared, leaveRoleSessionShared, getRoleSessionsShared,
+  getRoleSessions, joinRoleSessionShared, leaveRoleSessionShared, getRoleSessionsShared, syncSharedEventKey,
 } from "./adminConfig";
 import { syncReportsIfOnline } from "./sync";
 import QrImportModal from "./components/QrImportModal";
@@ -93,9 +93,9 @@ function LoginScreen({ onLogin }) {
   async function pitLogin() {
     const name = crewName.trim();
     if (!name) { setErr("Önce ismini yaz."); return; }
-    const res = await joinRoleSessionShared("pit_scout", name, 5, "pit");
+    const res = await joinRoleSessionShared("pit_scout", name, Number.MAX_SAFE_INTEGER, "pit");
     if (!res.ok) {
-      setErr(res.error === "FULL" ? "Pit dolu (maks 5 kişi)." : "Pit girişi başarısız.");
+      setErr("Pit girişi başarısız.");
       return;
     }
     onLogin({
@@ -200,8 +200,8 @@ function LoginScreen({ onLogin }) {
       <div className="app-quick-row">
         <div>
           <p className="app-login-group-label">🔍 Pit Tayfa</p>
-          <button className="app-quick-btn qbtn-pit" onClick={pitLogin} disabled={!crewName.trim() || pitSessions.length >= 5}>
-            PITE GİR ({pitSessions.length}/5)
+          <button className="app-quick-btn qbtn-pit" onClick={pitLogin} disabled={!crewName.trim()}>
+            PITE GİR ({pitSessions.length})
           </button>
           <div className="app-role-presence">
             {pitSessions.map((s) => <span key={s.id} className="app-role-chip">{s.name}</span>)}
@@ -305,6 +305,14 @@ export default function App() {
       document.removeEventListener("visibilitychange", handleVisible);
       navigator.serviceWorker?.removeEventListener?.("message", handleSwMessage);
     };
+  }, []);
+
+  // Keep event/division selection shared across devices
+  useEffect(() => {
+    const pullShared = () => { syncSharedEventKey(); };
+    pullShared();
+    const id = setInterval(pullShared, 5000);
+    return () => clearInterval(id);
   }, []);
 
   function login(cred) {

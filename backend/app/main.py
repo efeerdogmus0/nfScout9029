@@ -78,6 +78,7 @@ PRESENCE_TTL_MS = 12 * 60 * 60 * 1000
 FIELD_SEAT_ORDER = ["red1", "red2", "red3", "blue1", "blue2", "blue3"]
 FIELD_SEAT_ASSIGNMENTS: dict[str, dict] = {}
 ROLE_SESSIONS: dict[str, list[dict]] = {"pit_scout": [], "video_scout": []}
+ADMIN_SHARED_CONFIG: dict[str, str] = {"event_key": "2026new"}
 
 
 def _is_fresh_ts(ts: int | float | None) -> bool:
@@ -95,6 +96,11 @@ def _cleanup_presence() -> None:
     for role, sessions in ROLE_SESSIONS.items():
         cleaned[role] = [s for s in sessions if _is_fresh_ts(s.get("ts"))]
     ROLE_SESSIONS = cleaned
+
+
+def _sanitize_event_key(raw: str | None) -> str:
+    key = (raw or "").strip().lower()
+    return key or "2026new"
 
 
 @app.get("/health")
@@ -197,6 +203,18 @@ def presence_role_leave(role: str, payload: dict) -> dict:
         ROLE_SESSIONS[role] = []
     ROLE_SESSIONS[role] = [s for s in ROLE_SESSIONS[role] if s.get("id") != session_id]
     return {"ok": True}
+
+
+@app.get("/config/admin")
+def get_admin_shared_config() -> dict[str, str]:
+    return {"event_key": ADMIN_SHARED_CONFIG.get("event_key", "2026new")}
+
+
+@app.post("/config/admin/event-key")
+def set_admin_shared_event_key(payload: dict) -> dict[str, str]:
+    key = _sanitize_event_key(payload.get("event_key"))
+    ADMIN_SHARED_CONFIG["event_key"] = key
+    return {"event_key": key}
 
 
 @app.get("/live/hub-state/current", response_model=HubStateResponse)

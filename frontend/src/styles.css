@@ -620,6 +620,10 @@ section.terminal canvas { max-width: 640px; }
   flex-shrink: 0;
   white-space: nowrap;
 }
+.ef-qs-reset.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
 .ef-qs-reset:active { background: #3d1f00; }
 
 .ef-event-input {
