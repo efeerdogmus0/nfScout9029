@@ -117,8 +117,14 @@ export async function upsertPitReport(eventKey, teamKey, report) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ report }),
     });
-    return res.ok;
-  } catch {
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`upsertPitReport failed: ${res.status} ${text}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("upsertPitReport network error:", err);
     return false;
   }
 }

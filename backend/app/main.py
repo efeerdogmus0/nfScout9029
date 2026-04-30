@@ -31,6 +31,8 @@ from app.schemas import (
     MatchScoutReportOut,
     OpenRouterChatIn,
     OpenRouterChatOut,
+    OverlayPathIn,  # This might not be imported but just making sure it's valid
+    PitReportPayload,
     MultiPathOverlayIn,
     MultiPathOverlayOut,
     RefineryRevisionIn,
@@ -276,12 +278,12 @@ def get_event_pit_reports(event_key: str, db: Session = Depends(get_db)) -> dict
 
 
 @app.post("/events/{event_key}/pit-reports/{team_key}")
-def upsert_event_pit_report(event_key: str, team_key: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+def upsert_event_pit_report(event_key: str, team_key: str, payload: PitReportPayload, db: Session = Depends(get_db)) -> dict:
     key = _sanitize_event_key(event_key)
     normalized_team = _sanitize_team_key(team_key)
     if not normalized_team:
         raise HTTPException(status_code=400, detail="INVALID_TEAM_KEY")
-    report = payload.get("report")
+    report = payload.report
     if not isinstance(report, dict):
         raise HTTPException(status_code=400, detail="INVALID_REPORT")
 

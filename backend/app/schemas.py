@@ -222,3 +222,7 @@ class ScoutStatusOut(BaseModel):
     match_key: str
     seat: str
     last_seen: float
+
+class PitReportPayload(BaseModel):
+    report: dict
+
