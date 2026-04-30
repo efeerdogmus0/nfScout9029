@@ -382,6 +382,7 @@ export default function PitScoutPanel({ auth, onLogout }) {
   const [reports,      setReports]      = useState(loadReports);
   const [selectedTeam, setSelectedTeam] = useState(null);
   const [sidebarOpen,  setSidebarOpen]  = useState(true);
+  const [syncStatus, setSyncStatus] = useState("");
   const uploadTimersRef = useRef({});
 
   // Listen for event key changes
@@ -462,6 +463,58 @@ export default function PitScoutPanel({ auth, onLogout }) {
 
   function logout() { setSelectedTeam(null); onLogout?.(); }
 
+  async function syncAllLocalPitReports() {
+    if (!eventKey) return;
+    const all = loadReports();
+    const entries = Object.entries(all).filter(([, report]) => report && typeof report === "object");
+    if (!entries.length) {
+      setSyncStatus("Aktarılacak yerel pit raporu yok.");
+      return;
+    }
+    let okCount = 0;
+    for (const [teamKey, report] of entries) {
+      const outboxKey = `${eventKey}__${teamKey}`;
+      const meta = loadPitOutbox();
+      meta[outboxKey] = {
+        ...(meta[outboxKey] || {}),
+        event_key: eventKey,
+        team_key: teamKey,
+        state: "sending",
+        updated_at: Date.now(),
+        last_error: null,
+      };
+      savePitOutbox(meta);
+      try {
+        const ok = await upsertPitReport(eventKey, teamKey, report);
+        const latest = loadPitOutbox();
+        latest[outboxKey] = {
+          ...(latest[outboxKey] || {}),
+          event_key: eventKey,
+          team_key: teamKey,
+          state: ok ? "sent" : "failed",
+          last_success_at: ok ? Date.now() : (latest[outboxKey]?.last_success_at || null),
+          last_error: ok ? null : "upload_failed",
+        };
+        savePitOutbox(latest);
+        if (ok) okCount += 1;
+      } catch {
+        const latest = loadPitOutbox();
+        latest[outboxKey] = {
+          ...(latest[outboxKey] || {}),
+          event_key: eventKey,
+          team_key: teamKey,
+          state: "failed",
+          last_error: "network_error",
+        };
+        savePitOutbox(latest);
+      }
+    }
+    setSyncStatus(okCount === entries.length
+      ? `✓ ${okCount}/${entries.length} pit raporu aktarıldı.`
+      : `⚠ ${okCount}/${entries.length} aktarıldı. Kalanlar kuyrukta.`);
+    setTimeout(() => setSyncStatus(""), 4000);
+  }
+
   function updateReport(teamKey, data) {
     setReports((prev) => ({ ...prev, [teamKey]: data }));
     if (!eventKey) return;
@@ -523,8 +576,10 @@ export default function PitScoutPanel({ auth, onLogout }) {
         <span className="pit-progress">
           {doneCount}/{myTeams.length} ✓
         </span>
+        <button className="pit-retry-btn" onClick={syncAllLocalPitReports}>☁ Hepsini Aktar</button>
         <button className="pit-logout-btn" onClick={logout}>Çıkış</button>
       </div>
+      {syncStatus && <p className="pit-loading">{syncStatus}</p>}
 
       <div className="pit-body">
         {/* ── SIDEBAR: team list ── */}
