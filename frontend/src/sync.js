@@ -231,7 +231,8 @@ function saveJson(key, value) {
 }
 
 export async function syncPitOutboxIfOnline() {
-  if (!navigator.onLine) return { synced: 0, pending: 0 };
+  const healthy = await isBackendHealthy();
+  if (!healthy) return { synced: 0, pending: 0 };
   const pitOutbox = loadJson("pitReportsOutbox", {});
   const pitReports = loadJson("pitReports", {});
   let synced = 0;

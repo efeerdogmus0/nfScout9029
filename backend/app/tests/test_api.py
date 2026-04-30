@@ -196,3 +196,37 @@ def test_scout_login_assigns_fixed_seat() -> None:
 
     bad = client.post("/auth/scout-login", json={"username": "scout_red_1", "pin": "9999"})
     assert bad.status_code == 401
+
+
+def test_pit_report_upsert_and_read() -> None:
+    """Pit scouting verisi backend'e kaydedilip geri okunabilmeli."""
+    event = "2026testpit"
+    team = "frc9876"
+
+    # POST — yeni rapor yaz
+    r = client.post(
+        f"/events/{event}/pit-reports/{team}",
+        json={"report": {"drive": "Swerve", "completed": True, "notes": "test notu"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["team_key"] == team
+
+    # GET — geri oku, aynı veri gelmeli
+    g = client.get(f"/events/{event}/pit-reports")
+    assert g.status_code == 200
+    data = g.json()
+    assert team in data
+    assert data[team]["drive"] == "Swerve"
+    assert data[team]["completed"] is True
+
+    # Upsert — üzerine yaz
+    r2 = client.post(
+        f"/events/{event}/pit-reports/{team}",
+        json={"report": {"drive": "Tank/WCD", "completed": False}},
+    )
+    assert r2.status_code == 200
+    g2 = client.get(f"/events/{event}/pit-reports")
+    assert g2.json()[team]["drive"] == "Tank/WCD"
+
