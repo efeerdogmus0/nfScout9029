@@ -7,7 +7,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getEventKey, getMyTeam, getOpenRouterKey, getOpenRouterModel } from "../adminConfig";
-import { fetchSchedule, fetchEPA, runWinPredict, fetchHubState, runTacticalInsight, runOverlay, fetchMatchData, fetchRankings, getStrategyBoard, postStrategyBoard } from "../api";
+import { fetchSchedule, fetchEPA, runWinPredict, fetchHubState, runTacticalInsight, runOverlay, fetchMatchData, fetchRankings, getStrategyBoard, postStrategyBoard, fetchPitReports } from "../api";
 import { getOfflineReports, enrichReportsWithVideoFuel } from "../storage";
 import { generateStrategy, DEFAULT_MODEL } from "../strategyAI";
 import {
@@ -2411,17 +2411,26 @@ export default function WarRoomDashboard() {
     const loadReps = () => getOfflineReports()
       .then((r) => setScoutReps(enrichReportsWithVideoFuel(r)))
       .catch(() => {});
+    const refreshPitReports = () => {
+      if (!eventKey) return;
+      fetchPitReports(eventKey).then((remote) => {
+        const merged = { ...loadPitReports(), ...(remote || {}) };
+        setPitReports(merged);
+      }).catch(() => setPitReports(loadPitReports()));
+    };
     loadReps();
-    setPitReports(loadPitReports());
-    const onPit   = () => setPitReports(loadPitReports());
+    refreshPitReports();
+    const onPit   = () => refreshPitReports();
     const onVideo = () => loadReps();
+    const id = setInterval(refreshPitReports, 3000);
     window.addEventListener("pitReportsChanged", onPit);
     window.addEventListener("videoFuelChanged",  onVideo);
     return () => {
+      clearInterval(id);
       window.removeEventListener("pitReportsChanged", onPit);
       window.removeEventListener("videoFuelChanged",  onVideo);
     };
-  }, []);
+  }, [eventKey]);
 
   useEffect(() => {
     if (eventKey) {

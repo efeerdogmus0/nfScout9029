@@ -201,6 +201,7 @@ class VideoFuelEntry(BaseModel):
 
 class VideoFuelSubmitIn(BaseModel):
     match_key: str
+    match_start_sec: float | None = None
     entries: list[VideoFuelEntry] = Field(default_factory=list)
 
 

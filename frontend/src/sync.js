@@ -222,3 +222,79 @@ export async function syncReportsIfOnline(deviceId, reportsFromCaller) {
   try { window.dispatchEvent(new Event("offlineReportsChanged")); } catch {}
   return { synced, pending };
 }
+
+function loadJson(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; }
+}
+function saveJson(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+export async function syncPitOutboxIfOnline() {
+  if (!navigator.onLine) return { synced: 0, pending: 0 };
+  const pitOutbox = loadJson("pitReportsOutbox", {});
+  const pitReports = loadJson("pitReports", {});
+  let synced = 0;
+  for (const [id, meta] of Object.entries(pitOutbox)) {
+    if (!["pending", "failed", "sending"].includes(meta?.state)) continue;
+    const eventKey = meta?.event_key;
+    const teamKey = meta?.team_key;
+    const report = pitReports?.[teamKey];
+    if (!eventKey || !teamKey || !report || typeof report !== "object") continue;
+    pitOutbox[id] = { ...meta, state: "sending", last_error: null };
+    saveJson("pitReportsOutbox", pitOutbox);
+    try {
+      const r = await fetch(`${API_BASE}/events/${eventKey}/pit-reports/${teamKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ report }),
+      });
+      pitOutbox[id] = {
+        ...pitOutbox[id],
+        state: r.ok ? "sent" : "failed",
+        last_error: r.ok ? null : `http_${r.status}`,
+        last_success_at: r.ok ? Date.now() : (pitOutbox[id]?.last_success_at || null),
+      };
+      if (r.ok) synced += 1;
+    } catch {
+      pitOutbox[id] = { ...pitOutbox[id], state: "failed", last_error: "network_error" };
+    }
+    saveJson("pitReportsOutbox", pitOutbox);
+    window.dispatchEvent(new Event("pitOutboxChanged"));
+  }
+  const pending = Object.values(pitOutbox).filter((m) => ["pending", "failed", "sending"].includes(m.state)).length;
+  return { synced, pending };
+}
+
+export async function syncVideoOutboxIfOnline() {
+  if (!navigator.onLine) return { synced: 0, pending: 0 };
+  const outbox = loadJson("videoFuelOutbox", {});
+  let synced = 0;
+  for (const [id, meta] of Object.entries(outbox)) {
+    if (!["pending", "failed", "sending"].includes(meta?.state)) continue;
+    const payload = meta?.payload;
+    if (!payload?.match_key) continue;
+    outbox[id] = { ...meta, state: "sending", last_error: null };
+    saveJson("videoFuelOutbox", outbox);
+    try {
+      const r = await fetch(`${API_BASE}/video-scout/fuel-entry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      outbox[id] = {
+        ...outbox[id],
+        state: r.ok ? "sent" : "failed",
+        last_error: r.ok ? null : `http_${r.status}`,
+        last_success_at: r.ok ? Date.now() : (outbox[id]?.last_success_at || null),
+      };
+      if (r.ok) synced += 1;
+    } catch {
+      outbox[id] = { ...outbox[id], state: "failed", last_error: "network_error" };
+    }
+    saveJson("videoFuelOutbox", outbox);
+    window.dispatchEvent(new Event("videoOutboxChanged"));
+  }
+  const pending = Object.values(outbox).filter((m) => ["pending", "failed", "sending"].includes(m.state)).length;
+  return { synced, pending };
+}

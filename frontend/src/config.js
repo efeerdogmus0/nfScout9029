@@ -5,4 +5,17 @@ export const STATBOTICS_BASE = "https://api.statbotics.io/v3";
 export const CW = 640;
 export const CH = 320;
 
-export const DEVICE_ID = `app-${Math.random().toString(36).slice(2, 8)}`;
+function getStableDeviceId() {
+  const key = "deviceId";
+  try {
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const created = `app-${Math.random().toString(36).slice(2, 10)}`;
+    localStorage.setItem(key, created);
+    return created;
+  } catch {
+    return `app-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+export const DEVICE_ID = getStableDeviceId();

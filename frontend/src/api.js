@@ -100,6 +100,29 @@ export async function fetchEventTeams(eventKey) {
   }
 }
 
+export async function fetchPitReports(eventKey) {
+  try {
+    const res = await fetch(`${API_BASE}/events/${eventKey}/pit-reports`);
+    if (!res.ok) return {};
+    return await res.json();
+  } catch {
+    return {};
+  }
+}
+
+export async function upsertPitReport(eventKey, teamKey, report) {
+  try {
+    const res = await fetch(`${API_BASE}/events/${eventKey}/pit-reports/${teamKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ report }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function scoutLogin(payload) {
   const response = await fetch(`${API_BASE}/auth/scout-login`, {
     method: "POST",

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
 import { getAdminConfig, getEventKey, tbaParams } from "../adminConfig";
+import { API_BASE } from "../config";
 
-const API_BASE   = "http://localhost:8001";
 const SEATS      = ["red1", "red2", "red3", "blue1", "blue2", "blue3"];
+const VIDEO_OUTBOX_KEY = "videoFuelOutbox"; // { [match_key]: { state, updated_at, ... } }
 const SPEEDS     = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const ZOOMS      = [1, 1.5, 2, 2.5, 3];
 const QUALITIES  = [
@@ -53,6 +54,15 @@ function forceQuality(player, qKey) {
   [200, 600, 1400].forEach((ms) =>
     setTimeout(() => player?.setPlaybackQuality?.(qKey), ms)
   );
+}
+
+function loadVideoOutbox() {
+  try { return JSON.parse(localStorage.getItem(VIDEO_OUTBOX_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveVideoOutbox(next) {
+  localStorage.setItem(VIDEO_OUTBOX_KEY, JSON.stringify(next));
+  window.dispatchEvent(new Event("videoOutboxChanged"));
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────
@@ -236,6 +246,7 @@ export default function VideoScoutPanel() {
   async function submitFuel() {
     if (!selected) { setSubmitStatus("Önce maç seç."); return; }
     setSubmitStatus("Kaydediliyor...");
+    const outboxKey = selected.match_key;
 
     // Seat → team_key mapping
     const seatToTeam = (seat) => {
@@ -246,6 +257,17 @@ export default function VideoScoutPanel() {
     };
 
     // Persist fuel data locally so War Room analytics can use it
+    const submitPayload = {
+      match_key: selected.match_key,
+      match_start_sec: matchStartSec,
+      entries: entries.map((e) => ({
+        seat: e.seat,
+        fuel_scored: parseInt(e.fuelScored) || 0,
+        max_carried: parseInt(e.maxCarried) || 0,
+        note: e.shoots.length ? `shoots:${JSON.stringify(e.shoots)}` : "",
+      })),
+    };
+
     try {
       const stored = JSON.parse(localStorage.getItem("videoFuelData") || "{}");
       if (!stored[selected.match_key]) stored[selected.match_key] = {};
@@ -259,25 +281,45 @@ export default function VideoScoutPanel() {
       });
       localStorage.setItem("videoFuelData", JSON.stringify(stored));
       window.dispatchEvent(new Event("videoFuelChanged"));
+      const outbox = loadVideoOutbox();
+      outbox[outboxKey] = {
+        match_key: selected.match_key,
+        state: "pending",
+        updated_at: Date.now(),
+        last_error: null,
+        entry_count: entries.length,
+        payload: submitPayload,
+      };
+      saveVideoOutbox(outbox);
     } catch { /* localStorage failure non-fatal */ }
 
     try {
       const r = await fetch(`${API_BASE}/video-scout/fuel-entry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          match_key:       selected.match_key,
-          match_start_sec: matchStartSec,
-          entries: entries.map((e) => ({
-            seat:        e.seat,
-            fuel_scored: parseInt(e.fuelScored) || 0,
-            max_carried: parseInt(e.maxCarried) || 0,
-            note:        e.shoots.length ? `shoots:${JSON.stringify(e.shoots)}` : "",
-          })),
-        }),
+        body: JSON.stringify(submitPayload),
       });
+      const outbox = loadVideoOutbox();
+      outbox[outboxKey] = {
+        ...(outbox[outboxKey] || {}),
+        match_key: selected.match_key,
+        state: r.ok ? "sent" : "failed",
+        last_success_at: r.ok ? Date.now() : (outbox[outboxKey]?.last_success_at || null),
+        last_error: r.ok ? null : "upload_failed",
+      };
+      saveVideoOutbox(outbox);
       setSubmitStatus(r.ok ? "✓ Kaydedildi." : "✗ Sunucu hatası — yerel kayıt tamam.");
-    } catch { setSubmitStatus("✓ Yerel kayıt tamam. (Çevrimdışı)"); }
+    } catch {
+      const outbox = loadVideoOutbox();
+      outbox[outboxKey] = {
+        ...(outbox[outboxKey] || {}),
+        match_key: selected.match_key,
+        state: "failed",
+        last_error: "network_error",
+      };
+      saveVideoOutbox(outbox);
+      setSubmitStatus("✓ Yerel kayıt tamam. (Çevrimdışı)");
+    }
   }
 
   const filtered = compFilter === "all" ? matches : matches.filter((m) => m.comp_level === compFilter);

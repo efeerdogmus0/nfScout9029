@@ -14,7 +14,7 @@ import {
   getNextAvailableSeat, claimSeatShared, releaseSeatShared, getSeatAssignmentsShared,
   getRoleSessions, joinRoleSessionShared, leaveRoleSessionShared, getRoleSessionsShared, syncSharedEventKey,
 } from "./adminConfig";
-import { syncReportsIfOnline } from "./sync";
+import { syncPitOutboxIfOnline, syncReportsIfOnline, syncVideoOutboxIfOnline } from "./sync";
 import QrImportModal from "./components/QrImportModal";
 
 const SESSION_KEY = "appAuth";
@@ -281,9 +281,14 @@ export default function App() {
   // Auto-sync loop (online + periodic + visibility regain)
   useEffect(() => {
     const attemptSync = async () => {
-      const { synced } = await syncReportsIfOnline(DEVICE_ID);
-      if (synced > 0) {
-        setSyncToast(`✓ ${synced} rapor otomatik gönderildi`);
+      const [field, pit, video] = await Promise.all([
+        syncReportsIfOnline(DEVICE_ID),
+        syncPitOutboxIfOnline(),
+        syncVideoOutboxIfOnline(),
+      ]);
+      const totalSynced = (field?.synced || 0) + (pit?.synced || 0) + (video?.synced || 0);
+      if (totalSynced > 0) {
+        setSyncToast(`✓ ${totalSynced} kayıt otomatik gönderildi`);
         setTimeout(() => setSyncToast(""), 4000);
       }
     };

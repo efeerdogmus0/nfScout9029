@@ -5,10 +5,20 @@
  */
 import { useEffect, useRef, useState } from "react";
 
-import { getEventKey, getPitScoutCount, getTbaKey } from "../adminConfig";
-import { fetchEventTeams } from "../api";
+import { getEventKey, getPitScoutCount } from "../adminConfig";
+import { fetchEventTeams, fetchPitReports, upsertPitReport } from "../api";
 
 const LS_KEY = "pitReports"; // { [teamKey]: PitReport }
+const PIT_OUTBOX_KEY = "pitReportsOutbox"; // { [event__team]: { state, updated_at, last_error, ... } }
+
+function loadPitOutbox() {
+  try { return JSON.parse(localStorage.getItem(PIT_OUTBOX_KEY)) || {}; }
+  catch { return {}; }
+}
+function savePitOutbox(next) {
+  localStorage.setItem(PIT_OUTBOX_KEY, JSON.stringify(next));
+  window.dispatchEvent(new Event("pitOutboxChanged"));
+}
 
 // ─── CAPABILITY SCHEMA ────────────────────────────────────────────────────────
 // Capability toggle groups
@@ -372,6 +382,7 @@ export default function PitScoutPanel({ auth, onLogout }) {
   const [reports,      setReports]      = useState(loadReports);
   const [selectedTeam, setSelectedTeam] = useState(null);
   const [sidebarOpen,  setSidebarOpen]  = useState(true);
+  const uploadTimersRef = useRef({});
 
   // Listen for event key changes
   useEffect(() => {
@@ -393,13 +404,106 @@ export default function PitScoutPanel({ auth, onLogout }) {
   }
   useEffect(() => { loadTeams(); }, [eventKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Pull shared pit reports from backend and merge local unsynced edits on top.
+  useEffect(() => {
+    if (!eventKey) return;
+    const local = loadReports();
+    fetchPitReports(eventKey).then((remote) => {
+      setReports((prev) => ({ ...(remote || {}), ...local, ...prev }));
+    }).catch(() => {});
+    Object.entries(local).forEach(([teamKey, report]) => {
+      if (!report || typeof report !== "object") return;
+      const outboxKey = `${eventKey}__${teamKey}`;
+      const meta = loadPitOutbox();
+      meta[outboxKey] = {
+        ...(meta[outboxKey] || {}),
+        event_key: eventKey,
+        team_key: teamKey,
+        state: "pending",
+        updated_at: Date.now(),
+        last_error: null,
+      };
+      savePitOutbox(meta);
+      upsertPitReport(eventKey, teamKey, report)
+        .then((ok) => {
+          const latest = loadPitOutbox();
+          latest[outboxKey] = {
+            ...(latest[outboxKey] || {}),
+            event_key: eventKey,
+            team_key: teamKey,
+            state: ok ? "sent" : "failed",
+            last_success_at: ok ? Date.now() : (latest[outboxKey]?.last_success_at || null),
+            last_error: ok ? null : "upload_failed",
+          };
+          savePitOutbox(latest);
+        })
+        .catch(() => {
+          const latest = loadPitOutbox();
+          latest[outboxKey] = {
+            ...(latest[outboxKey] || {}),
+            event_key: eventKey,
+            team_key: teamKey,
+            state: "failed",
+            last_error: "network_error",
+          };
+          savePitOutbox(latest);
+        });
+    });
+  }, [eventKey]);
+
   // Persist reports on every change
   useEffect(() => { saveReports(reports); }, [reports]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(uploadTimersRef.current).forEach((t) => clearTimeout(t));
+    };
+  }, []);
 
   function logout() { setSelectedTeam(null); onLogout?.(); }
 
   function updateReport(teamKey, data) {
     setReports((prev) => ({ ...prev, [teamKey]: data }));
+    if (!eventKey) return;
+    const outboxKey = `${eventKey}__${teamKey}`;
+    const meta = loadPitOutbox();
+    meta[outboxKey] = {
+      ...(meta[outboxKey] || {}),
+      event_key: eventKey,
+      team_key: teamKey,
+      state: "pending",
+      updated_at: Date.now(),
+      last_error: null,
+    };
+    savePitOutbox(meta);
+    const existing = uploadTimersRef.current[teamKey];
+    if (existing) clearTimeout(existing);
+    uploadTimersRef.current[teamKey] = setTimeout(() => {
+      upsertPitReport(eventKey, teamKey, data)
+        .then((ok) => {
+          const latest = loadPitOutbox();
+          latest[outboxKey] = {
+            ...(latest[outboxKey] || {}),
+            event_key: eventKey,
+            team_key: teamKey,
+            state: ok ? "sent" : "failed",
+            last_success_at: ok ? Date.now() : (latest[outboxKey]?.last_success_at || null),
+            last_error: ok ? null : "upload_failed",
+          };
+          savePitOutbox(latest);
+        })
+        .catch(() => {
+          const latest = loadPitOutbox();
+          latest[outboxKey] = {
+            ...(latest[outboxKey] || {}),
+            event_key: eventKey,
+            team_key: teamKey,
+            state: "failed",
+            last_error: "network_error",
+          };
+          savePitOutbox(latest);
+        });
+    }, 700);
   }
 
   const pitCount  = getPitScoutCount();

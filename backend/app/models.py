@@ -66,3 +66,48 @@ class SyncUploadReceipt(Base):
     team_key: Mapped[str] = mapped_column(String(16), index=True)
     updated_at: Mapped[int] = mapped_column(Integer, default=0)
     report_row_id: Mapped[int] = mapped_column(Integer, index=True)
+
+
+class PresenceFieldSeat(Base):
+    __tablename__ = "presence_field_seats"
+
+    seat: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)
+
+
+class PresenceRoleSession(Base):
+    __tablename__ = "presence_role_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    role: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    seat: Mapped[str] = mapped_column(String(32))
+    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)
+
+
+class AdminSharedConfig(Base):
+    __tablename__ = "admin_shared_config"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(256), default="")
+
+
+class PitScoutReport(Base):
+    __tablename__ = "pit_scout_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_key: Mapped[str] = mapped_column(String(32), index=True)
+    team_key: Mapped[str] = mapped_column(String(16), index=True)
+    report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)
+
+
+class VideoFuelSubmission(Base):
+    __tablename__ = "video_fuel_submissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_key: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    match_start_sec: Mapped[float | None] = mapped_column(nullable=True)
+    entries: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)

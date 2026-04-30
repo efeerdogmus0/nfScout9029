@@ -5,7 +5,7 @@ import {
   getPitCredentials, getPitScoutCount,
   setScoutName, getScoutNames, setSharedEventKey, syncSharedEventKey,
 } from "../adminConfig";
-import { fetchEventTeams, fetchSchedule } from "../api";
+import { fetchEventTeams, fetchPitReports, fetchSchedule } from "../api";
 import { getOfflineReports, getOutboxMeta } from "../storage";
 import { getSyncTelemetry } from "../sync";
 import FieldSetupTool from "./FieldSetupTool";
@@ -22,6 +22,7 @@ const KNOWN_EVENTS = [
 const TABS = [
   { key: "settings", label: "⚙️ Ayarlar"  },
   { key: "pit",      label: "👷 Pit Tayfa" },
+  { key: "queue",    label: "📦 Senkron Kuyruğu" },
   { key: "coverage", label: "📊 Kapsama"   },
   { key: "calib",    label: "📐 Kalibre"   },
 ];
@@ -48,11 +49,16 @@ function NameInput({ username, initialName }) {
 function PitTab({ pitCount, pitCreds, scoutNames, changePitCount, config }) {
   const [allTeams,  setAllTeams]  = useState([]);
   const [loadState, setLoadState] = useState("idle"); // "idle"|"loading"|"error"
+  const [pitReports, setPitReports] = useState({});
 
-  // Pit reports stored in localStorage
-  const pitReports = (() => {
-    try { return JSON.parse(localStorage.getItem("pitReports")) || {}; } catch { return {}; }
-  })();
+  useEffect(() => {
+    if (!config.eventKey) return;
+    fetchPitReports(config.eventKey).then((remote) => {
+      setPitReports(remote || {});
+    }).catch(() => {
+      setPitReports({});
+    });
+  }, [config.eventKey]);
 
   const scouted = new Set(Object.keys(pitReports));
   const missing = allTeams.filter(tk => !scouted.has(tk));
@@ -404,6 +410,137 @@ function SyncTelemetryCard() {
   );
 }
 
+function loadJson(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) || fallback; } catch { return fallback; }
+}
+
+function SyncQueueTab({ config }) {
+  const [fieldRows, setFieldRows] = useState([]);
+  const [pitRows, setPitRows] = useState([]);
+  const [videoRows, setVideoRows] = useState([]);
+  const [pitLocalOnlyRows, setPitLocalOnlyRows] = useState([]);
+  const [refreshTs, setRefreshTs] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh() {
+      const reports = await getOfflineReports().catch(() => []);
+      const meta = getOutboxMeta();
+      const pitOutbox = loadJson("pitReportsOutbox", {});
+      const videoOutbox = loadJson("videoFuelOutbox", {});
+      const localPitReports = loadJson("pitReports", {});
+      let remotePitReports = {};
+      try {
+        if (config.eventKey) remotePitReports = await fetchPitReports(config.eventKey);
+      } catch {}
+
+      const field = (reports || [])
+        .map((r) => ({ ...r, _m: meta[r.report_id || ""] || {} }))
+        .filter((r) => ["pending", "failed", "sending", "conflicted"].includes(r._m.state || "pending"))
+        .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+        .slice(0, 200)
+        .map((r) => ({
+          id: r.report_id || `${r.match_key}-${r.team_key}`,
+          state: r._m.state || "pending",
+          match_key: r.match_key,
+          team_key: r.team_key,
+          error: r._m.last_error || null,
+          updated_at: r.updated_at || null,
+        }));
+
+      const pit = Object.entries(pitOutbox)
+        .map(([id, m]) => ({ id, ...m }))
+        .filter((m) => m.event_key === config.eventKey)
+        .filter((m) => ["pending", "failed", "sending"].includes(m.state))
+        .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+        .slice(0, 200);
+
+      const pitLocalOnly = Object.keys(localPitReports || {})
+        .filter((teamKey) => !remotePitReports?.[teamKey])
+        .slice(0, 200)
+        .map((teamKey) => ({
+          id: `local-only-${teamKey}`,
+          team_key: teamKey,
+          state: "local_only",
+          last_error: "sunucuda_kayit_yok",
+        }));
+
+      const video = Object.entries(videoOutbox)
+        .map(([id, m]) => ({ id, ...m }))
+        .filter((m) => ["pending", "failed", "sending"].includes(m.state))
+        .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+        .slice(0, 200);
+
+      if (cancelled) return;
+      setFieldRows(field);
+      setPitRows(pit);
+      setPitLocalOnlyRows(pitLocalOnly);
+      setVideoRows(video);
+      setRefreshTs(Date.now());
+    }
+    refresh();
+    const id = setInterval(refresh, 3000);
+    window.addEventListener("outboxMetaChanged", refresh);
+    window.addEventListener("pitOutboxChanged", refresh);
+    window.addEventListener("videoOutboxChanged", refresh);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      window.removeEventListener("outboxMetaChanged", refresh);
+      window.removeEventListener("pitOutboxChanged", refresh);
+      window.removeEventListener("videoOutboxChanged", refresh);
+    };
+  }, [config.eventKey]);
+
+  const totalPending = fieldRows.length + pitRows.length + pitLocalOnlyRows.length + videoRows.length;
+
+  return (
+    <div className="admin-sync-card">
+      <div className="admin-sync-title" style={{ display: "flex", justifyContent: "space-between", gap: "0.75rem" }}>
+        <span>📦 İnternete Gitmeyen Veriler</span>
+        <button className="admin-missing-refresh" onClick={() => window.dispatchEvent(new Event("outboxMetaChanged"))}>↻ Yenile</button>
+      </div>
+      <div className="admin-sync-line">
+        Toplam bekleyen: <strong>{totalPending}</strong> · son yenileme: <strong>{fmtTs(refreshTs)}</strong>
+      </div>
+
+      <div className="admin-sync-line"><strong>Field Scout Raporları ({fieldRows.length})</strong></div>
+      {fieldRows.length === 0 ? <div className="admin-sync-line">Bekleyen yok.</div> : fieldRows.map((r) => (
+        <div key={r.id} className="admin-sync-line">
+          {r.match_key} · {r.team_key} · <strong>{r.state}</strong>{r.error ? ` · ${r.error}` : ""}
+        </div>
+      ))}
+
+      <div className="admin-sync-line" style={{ marginTop: "0.75rem" }}>
+        <strong>Pit Raporları ({pitRows.length + pitLocalOnlyRows.length})</strong>
+      </div>
+      {pitRows.length === 0 && pitLocalOnlyRows.length === 0 ? (
+        <div className="admin-sync-line">Bekleyen yok.</div>
+      ) : (
+        <>
+          {pitRows.map((r) => (
+            <div key={r.id} className="admin-sync-line">
+              {r.team_key} · <strong>{r.state}</strong>{r.last_error ? ` · ${r.last_error}` : ""}
+            </div>
+          ))}
+          {pitLocalOnlyRows.map((r) => (
+            <div key={r.id} className="admin-sync-line">
+              {r.team_key} · <strong>local_only</strong> · sunucuda kayıt yok
+            </div>
+          ))}
+        </>
+      )}
+
+      <div className="admin-sync-line" style={{ marginTop: "0.75rem" }}><strong>Video Fuel Kayıtları ({videoRows.length})</strong></div>
+      {videoRows.length === 0 ? <div className="admin-sync-line">Bekleyen yok.</div> : videoRows.map((r) => (
+        <div key={r.id} className="admin-sync-line">
+          {r.match_key} · kayıt:{r.entry_count || 0} · <strong>{r.state}</strong>{r.last_error ? ` · ${r.last_error}` : ""}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ─── MAIN ────────────────────────────────────────────────────────────────────
 export default function AdminPanel() {
   const [tab,      setTab]      = useState("settings");
@@ -571,6 +708,9 @@ export default function AdminPanel() {
           changePitCount={changePitCount} config={config}
         />
       )}
+
+      {/* ── SYNC QUEUE ── */}
+      {tab === "queue" && <SyncQueueTab config={config} />}
 
       {/* ── COVERAGE ── */}
       {tab === "coverage" && <CoverageTab config={config} />}

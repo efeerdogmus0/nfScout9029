@@ -10,7 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
-from app.models import HubState, MatchScoutReport, MatchStrategyBoard, SyncUploadReceipt
+from app.models import (
+    AdminSharedConfig,
+    HubState,
+    MatchScoutReport,
+    MatchStrategyBoard,
+    PitScoutReport,
+    PresenceFieldSeat,
+    PresenceRoleSession,
+    SyncUploadReceipt,
+    VideoFuelSubmission,
+)
 from app.schemas import (
     ActiveQualificationOut,
     CollisionWarning,
@@ -76,9 +86,6 @@ ACTIVE_SCOUTS: dict[str, dict] = {}
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 PRESENCE_TTL_MS = 12 * 60 * 60 * 1000
 FIELD_SEAT_ORDER = ["red1", "red2", "red3", "blue1", "blue2", "blue3"]
-FIELD_SEAT_ASSIGNMENTS: dict[str, dict] = {}
-ROLE_SESSIONS: dict[str, list[dict]] = {"pit_scout": [], "video_scout": []}
-ADMIN_SHARED_CONFIG: dict[str, str] = {"event_key": "2026new"}
 
 
 def _is_fresh_ts(ts: int | float | None) -> bool:
@@ -87,20 +94,27 @@ def _is_fresh_ts(ts: int | float | None) -> bool:
     return (time() * 1000 - float(ts)) < PRESENCE_TTL_MS
 
 
-def _cleanup_presence() -> None:
-    global FIELD_SEAT_ASSIGNMENTS, ROLE_SESSIONS
-    FIELD_SEAT_ASSIGNMENTS = {
-        seat: v for seat, v in FIELD_SEAT_ASSIGNMENTS.items() if _is_fresh_ts(v.get("ts"))
-    }
-    cleaned: dict[str, list[dict]] = {}
-    for role, sessions in ROLE_SESSIONS.items():
-        cleaned[role] = [s for s in sessions if _is_fresh_ts(s.get("ts"))]
-    ROLE_SESSIONS = cleaned
+def _presence_cutoff_ms() -> int:
+    return int(time() * 1000 - PRESENCE_TTL_MS)
+
+
+def _cleanup_presence_db(db: Session) -> None:
+    cutoff = _presence_cutoff_ms()
+    db.query(PresenceFieldSeat).filter(PresenceFieldSeat.updated_at < cutoff).delete()
+    db.query(PresenceRoleSession).filter(PresenceRoleSession.updated_at < cutoff).delete()
+    db.commit()
 
 
 def _sanitize_event_key(raw: str | None) -> str:
     key = (raw or "").strip().lower()
     return key or "2026new"
+
+
+def _sanitize_team_key(raw: str | None) -> str:
+    key = (raw or "").strip().lower()
+    if not key:
+        return ""
+    return key if key.startswith("frc") else f"frc{key}"
 
 
 @app.get("/health")
@@ -136,85 +150,161 @@ def heartbeat_scout_status(payload: ScoutStatusIn, device_id: str = Query(...)):
 
 
 @app.get("/presence/field-seats")
-def presence_field_seats() -> dict[str, dict]:
-    _cleanup_presence()
-    return FIELD_SEAT_ASSIGNMENTS
+def presence_field_seats(db: Session = Depends(get_db)) -> dict[str, dict]:
+    _cleanup_presence_db(db)
+    rows = db.query(PresenceFieldSeat).all()
+    return {r.seat: {"name": r.name, "ts": r.updated_at} for r in rows}
 
 
 @app.post("/presence/field-seats/claim")
-def presence_claim_field_seat(payload: dict) -> dict:
+def presence_claim_field_seat(payload: dict, db: Session = Depends(get_db)) -> dict:
     seat = str(payload.get("seat") or "").strip().lower()
     name = str(payload.get("name") or "").strip()
     if seat not in FIELD_SEAT_ORDER:
         raise HTTPException(status_code=400, detail="INVALID_SEAT")
     if not name:
         raise HTTPException(status_code=400, detail="EMPTY_NAME")
-    FIELD_SEAT_ASSIGNMENTS[seat] = {"name": name, "ts": int(time() * 1000)}
-    _cleanup_presence()
+    now_ms = int(time() * 1000)
+    row = db.get(PresenceFieldSeat, seat)
+    if row:
+        row.name = name
+        row.updated_at = now_ms
+    else:
+        db.add(PresenceFieldSeat(seat=seat, name=name, updated_at=now_ms))
+    _cleanup_presence_db(db)
+    db.commit()
     return {"ok": True}
 
 
 @app.post("/presence/field-seats/release")
-def presence_release_field_seat(payload: dict) -> dict:
+def presence_release_field_seat(payload: dict, db: Session = Depends(get_db)) -> dict:
     seat = str(payload.get("seat") or "").strip().lower()
-    if seat in FIELD_SEAT_ASSIGNMENTS:
-        del FIELD_SEAT_ASSIGNMENTS[seat]
+    db.query(PresenceFieldSeat).filter(PresenceFieldSeat.seat == seat).delete()
+    db.commit()
     return {"ok": True}
 
 
 @app.get("/presence/role-sessions/{role}")
-def presence_role_sessions(role: str) -> list[dict]:
-    _cleanup_presence()
-    return sorted(ROLE_SESSIONS.get(role, []), key=lambda s: s.get("ts", 0))
+def presence_role_sessions(role: str, db: Session = Depends(get_db)) -> list[dict]:
+    _cleanup_presence_db(db)
+    rows = (
+        db.query(PresenceRoleSession)
+        .filter(PresenceRoleSession.role == role)
+        .order_by(PresenceRoleSession.updated_at.asc())
+        .all()
+    )
+    return [{"id": r.id, "name": r.name, "seat": r.seat, "ts": r.updated_at} for r in rows]
 
 
 @app.post("/presence/role-sessions/{role}/join")
-def presence_role_join(role: str, payload: dict) -> dict:
+def presence_role_join(role: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     name = str(payload.get("name") or "").strip()
     max_count = int(payload.get("maxCount") or 9999)
     seat_prefix = str(payload.get("seatPrefix") or "role").strip()
     if not name:
         raise HTTPException(status_code=400, detail="EMPTY_NAME")
-    if role not in ROLE_SESSIONS:
-        ROLE_SESSIONS[role] = []
-    _cleanup_presence()
-    sessions = sorted(ROLE_SESSIONS[role], key=lambda s: s.get("ts", 0))
+    _cleanup_presence_db(db)
+    sessions = (
+        db.query(PresenceRoleSession)
+        .filter(PresenceRoleSession.role == role)
+        .order_by(PresenceRoleSession.updated_at.asc())
+        .all()
+    )
     if len(sessions) >= max_count:
         raise HTTPException(status_code=409, detail="FULL")
-    used = {s.get("seat") for s in sessions}
+    used = {s.seat for s in sessions}
     idx = 1
     while f"{seat_prefix}{idx}" in used:
         idx += 1
+    now_ms = int(time() * 1000)
     sess = {
-        "id": f"{int(time() * 1000)}-{os.urandom(3).hex()}",
+        "id": f"{now_ms}-{os.urandom(3).hex()}",
         "name": name,
         "seat": f"{seat_prefix}{idx}",
-        "ts": int(time() * 1000),
+        "ts": now_ms,
     }
-    sessions.append(sess)
-    ROLE_SESSIONS[role] = sessions
-    return {"ok": True, "session": sess, "count": len(sessions)}
+    db.add(
+        PresenceRoleSession(
+            id=sess["id"],
+            role=role,
+            name=sess["name"],
+            seat=sess["seat"],
+            updated_at=sess["ts"],
+        )
+    )
+    db.commit()
+    return {"ok": True, "session": sess, "count": len(sessions) + 1}
 
 
 @app.post("/presence/role-sessions/{role}/leave")
-def presence_role_leave(role: str, payload: dict) -> dict:
+def presence_role_leave(role: str, payload: dict, db: Session = Depends(get_db)) -> dict:
     session_id = str(payload.get("sessionId") or "").strip()
-    if role not in ROLE_SESSIONS:
-        ROLE_SESSIONS[role] = []
-    ROLE_SESSIONS[role] = [s for s in ROLE_SESSIONS[role] if s.get("id") != session_id]
+    db.query(PresenceRoleSession).filter(
+        PresenceRoleSession.role == role, PresenceRoleSession.id == session_id
+    ).delete()
+    db.commit()
     return {"ok": True}
 
 
 @app.get("/config/admin")
-def get_admin_shared_config() -> dict[str, str]:
-    return {"event_key": ADMIN_SHARED_CONFIG.get("event_key", "2026new")}
+def get_admin_shared_config(db: Session = Depends(get_db)) -> dict[str, str]:
+    row = db.get(AdminSharedConfig, "event_key")
+    if not row:
+        row = AdminSharedConfig(key="event_key", value="2026new")
+        db.add(row)
+        db.commit()
+    return {"event_key": _sanitize_event_key(row.value)}
 
 
 @app.post("/config/admin/event-key")
-def set_admin_shared_event_key(payload: dict) -> dict[str, str]:
+def set_admin_shared_event_key(payload: dict, db: Session = Depends(get_db)) -> dict[str, str]:
     key = _sanitize_event_key(payload.get("event_key"))
-    ADMIN_SHARED_CONFIG["event_key"] = key
+    row = db.get(AdminSharedConfig, "event_key")
+    if row:
+        row.value = key
+    else:
+        db.add(AdminSharedConfig(key="event_key", value=key))
+    db.commit()
     return {"event_key": key}
+
+
+@app.get("/events/{event_key}/pit-reports")
+def get_event_pit_reports(event_key: str, db: Session = Depends(get_db)) -> dict[str, dict]:
+    key = _sanitize_event_key(event_key)
+    rows = db.query(PitScoutReport).filter(PitScoutReport.event_key == key).all()
+    return {r.team_key: (r.report or {}) for r in rows}
+
+
+@app.post("/events/{event_key}/pit-reports/{team_key}")
+def upsert_event_pit_report(event_key: str, team_key: str, payload: dict, db: Session = Depends(get_db)) -> dict:
+    key = _sanitize_event_key(event_key)
+    normalized_team = _sanitize_team_key(team_key)
+    if not normalized_team:
+        raise HTTPException(status_code=400, detail="INVALID_TEAM_KEY")
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=400, detail="INVALID_REPORT")
+
+    row = db.scalar(
+        select(PitScoutReport)
+        .where(PitScoutReport.event_key == key)
+        .where(PitScoutReport.team_key == normalized_team)
+    )
+    now_ms = int(time() * 1000)
+    if row:
+        row.report = report
+        row.updated_at = now_ms
+    else:
+        db.add(
+            PitScoutReport(
+                event_key=key,
+                team_key=normalized_team,
+                report=report,
+                updated_at=now_ms,
+            )
+        )
+    db.commit()
+    return {"ok": True, "event_key": key, "team_key": normalized_team, "updated_at": now_ms}
 
 
 @app.get("/live/hub-state/current", response_model=HubStateResponse)
@@ -618,8 +708,24 @@ def warroom_multi_path_overlay(payload: MultiPathOverlayIn) -> MultiPathOverlayO
 
 
 @app.post("/video-scout/fuel-entry", response_model=VideoFuelSubmitOut)
-def video_fuel_entry(payload: VideoFuelSubmitIn) -> VideoFuelSubmitOut:
-    # Stored in-memory for now; can be persisted to DB via a separate model
+def video_fuel_entry(payload: VideoFuelSubmitIn, db: Session = Depends(get_db)) -> VideoFuelSubmitOut:
+    row = db.scalar(select(VideoFuelSubmission).where(VideoFuelSubmission.match_key == payload.match_key))
+    now_ms = int(time() * 1000)
+    entries = [entry.model_dump() for entry in payload.entries]
+    if row:
+        row.match_start_sec = payload.match_start_sec
+        row.entries = entries
+        row.updated_at = now_ms
+    else:
+        db.add(
+            VideoFuelSubmission(
+                match_key=payload.match_key,
+                match_start_sec=payload.match_start_sec,
+                entries=entries,
+                updated_at=now_ms,
+            )
+        )
+    db.commit()
     return VideoFuelSubmitOut(match_key=payload.match_key, saved=len(payload.entries))
 
 
