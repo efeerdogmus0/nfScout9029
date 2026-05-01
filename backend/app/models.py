@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Enum as SAEnum, Integer, String
+from sqlalchemy import JSON, BigInteger, Boolean, Enum as SAEnum, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -64,7 +64,7 @@ class SyncUploadReceipt(Base):
     device_id: Mapped[str] = mapped_column(String(64), index=True)
     match_key: Mapped[str] = mapped_column(String(32), index=True)
     team_key: Mapped[str] = mapped_column(String(16), index=True)
-    updated_at: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[int] = mapped_column(BigInteger, default=0)
     report_row_id: Mapped[int] = mapped_column(Integer, index=True)
 
 
@@ -73,7 +73,7 @@ class PresenceFieldSeat(Base):
 
     seat: Mapped[str] = mapped_column(String(16), primary_key=True)
     name: Mapped[str] = mapped_column(String(128))
-    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    updated_at: Mapped[int] = mapped_column(BigInteger, index=True, default=0)
 
 
 class PresenceRoleSession(Base):
@@ -83,7 +83,7 @@ class PresenceRoleSession(Base):
     role: Mapped[str] = mapped_column(String(32), index=True)
     name: Mapped[str] = mapped_column(String(128))
     seat: Mapped[str] = mapped_column(String(32))
-    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    updated_at: Mapped[int] = mapped_column(BigInteger, index=True, default=0)
 
 
 class AdminSharedConfig(Base):
@@ -100,7 +100,7 @@ class PitScoutReport(Base):
     event_key: Mapped[str] = mapped_column(String(32), index=True)
     team_key: Mapped[str] = mapped_column(String(16), index=True)
     report: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    updated_at: Mapped[int] = mapped_column(BigInteger, index=True, default=0)
 
 
 class VideoFuelSubmission(Base):
@@ -110,4 +110,4 @@ class VideoFuelSubmission(Base):
     match_key: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     match_start_sec: Mapped[float | None] = mapped_column(nullable=True)
     entries: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    updated_at: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    updated_at: Mapped[int] = mapped_column(BigInteger, index=True, default=0)
