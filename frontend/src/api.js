@@ -111,21 +111,35 @@ export async function fetchPitReports(eventKey) {
 }
 
 export async function upsertPitReport(eventKey, teamKey, report) {
-  try {
+  const doRequest = async (payload) => {
     const res = await fetch(`${API_BASE}/events/${eventKey}/pit-reports/${teamKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ report }),
+      body: JSON.stringify({ report: payload }),
     });
+    return res;
+  };
+
+  try {
+    let res = await doRequest(report);
     if (!res.ok) {
-      const text = await res.text();
+      const text = await res.text().catch(() => "");
+      // Large base64 pit photo can exceed proxy/body limits on some deployments.
+      // Retry without photo so the main scouting payload is still shared.
+      if (res.status === 413 && report?.photo) {
+        const fallback = { ...report, photo: null, photoSyncSkipped: true };
+        res = await doRequest(fallback);
+        if (res.ok) {
+          return { ok: true, skippedPhoto: true };
+        }
+      }
       console.error(`upsertPitReport failed: ${res.status} ${text}`);
-      return false;
+      return { ok: false, error: `http_${res.status}` };
     }
-    return true;
+    return { ok: true, skippedPhoto: false };
   } catch (err) {
     console.error("upsertPitReport network error:", err);
-    return false;
+    return { ok: false, error: "network_error" };
   }
 }
 

@@ -427,7 +427,8 @@ export default function PitScoutPanel({ auth, onLogout }) {
       };
       savePitOutbox(meta);
       upsertPitReport(eventKey, teamKey, report)
-        .then((ok) => {
+        .then((result) => {
+          const ok = !!result?.ok;
           const latest = loadPitOutbox();
           latest[outboxKey] = {
             ...(latest[outboxKey] || {}),
@@ -435,7 +436,7 @@ export default function PitScoutPanel({ auth, onLogout }) {
             team_key: teamKey,
             state: ok ? "sent" : "failed",
             last_success_at: ok ? Date.now() : (latest[outboxKey]?.last_success_at || null),
-            last_error: ok ? null : "upload_failed",
+            last_error: ok ? (result?.skippedPhoto ? "photo_skipped" : null) : (result?.error || "upload_failed"),
           };
           savePitOutbox(latest);
         })
@@ -496,7 +497,8 @@ export default function PitScoutPanel({ auth, onLogout }) {
       };
       savePitOutbox(meta);
       try {
-        const ok = await upsertPitReport(eventKey, teamKey, report);
+        const result = await upsertPitReport(eventKey, teamKey, report);
+        const ok = !!result?.ok;
         const latest = loadPitOutbox();
         latest[outboxKey] = {
           ...(latest[outboxKey] || {}),
@@ -504,7 +506,7 @@ export default function PitScoutPanel({ auth, onLogout }) {
           team_key: teamKey,
           state: ok ? "sent" : "failed",
           last_success_at: ok ? Date.now() : (latest[outboxKey]?.last_success_at || null),
-          last_error: ok ? null : "upload_failed",
+          last_error: ok ? (result?.skippedPhoto ? "photo_skipped" : null) : (result?.error || "upload_failed"),
         };
         savePitOutbox(latest);
         if (ok) okCount += 1;
@@ -520,9 +522,16 @@ export default function PitScoutPanel({ auth, onLogout }) {
         savePitOutbox(latest);
       }
     }
-    setSyncStatus(okCount === entries.length
-      ? `✓ ${okCount}/${entries.length} pit raporu aktarıldı.`
-      : `⚠ ${okCount}/${entries.length} aktarıldı. Kalanlar kuyrukta.`);
+    const failed = entries.length - okCount;
+    if (failed === 0) {
+      setSyncStatus(`✓ ${okCount}/${entries.length} pit raporu aktarıldı.`);
+    } else {
+      const outbox = loadPitOutbox();
+      const anyPhotoSkipped = Object.values(outbox).some((m) => m?.last_error === "photo_skipped");
+      setSyncStatus(anyPhotoSkipped
+        ? `⚠ ${okCount}/${entries.length} aktarıldı. Bazı fotoğraflar büyük olduğu için atlandı.`
+        : `⚠ ${okCount}/${entries.length} aktarıldı. Kalanlar kuyrukta.`);
+    }
     setTimeout(() => setSyncStatus(""), 5000);
   }
 
@@ -544,7 +553,8 @@ export default function PitScoutPanel({ auth, onLogout }) {
     if (existing) clearTimeout(existing);
     uploadTimersRef.current[teamKey] = setTimeout(() => {
       upsertPitReport(eventKey, teamKey, data)
-        .then((ok) => {
+        .then((result) => {
+          const ok = !!result?.ok;
           const latest = loadPitOutbox();
           latest[outboxKey] = {
             ...(latest[outboxKey] || {}),
@@ -552,7 +562,7 @@ export default function PitScoutPanel({ auth, onLogout }) {
             team_key: teamKey,
             state: ok ? "sent" : "failed",
             last_success_at: ok ? Date.now() : (latest[outboxKey]?.last_success_at || null),
-            last_error: ok ? null : "upload_failed",
+            last_error: ok ? (result?.skippedPhoto ? "photo_skipped" : null) : (result?.error || "upload_failed"),
           };
           savePitOutbox(latest);
         })
