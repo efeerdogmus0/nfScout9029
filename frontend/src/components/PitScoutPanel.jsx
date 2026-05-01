@@ -7,7 +7,6 @@ import { useEffect, useRef, useState } from "react";
 
 import { getEventKey, getPitScoutCount } from "../adminConfig";
 import { fetchEventTeams, fetchPitReports, upsertPitReport } from "../api";
-import { API_BASE } from "../config";
 
 const LS_KEY = "pitReports"; // { [teamKey]: PitReport }
 const PIT_OUTBOX_KEY = "pitReportsOutbox"; // { [event__team]: { state, updated_at, last_error, ... } }
@@ -467,15 +466,6 @@ export default function PitScoutPanel({ auth, onLogout }) {
 
   async function syncAllLocalPitReports() {
     if (!eventKey) return;
-    // Backend erişilebilirlik kontrolü — önce ping at
-    const backendOk = await fetch(`${API_BASE}/live/hub-state/current`, { method: "GET" })
-      .then((r) => r.ok)
-      .catch(() => false);
-    if (!backendOk) {
-      setSyncStatus("⚠ Backend'e bağlanılamadı. Ağ/sunucu bağlantısını kontrol et.");
-      setTimeout(() => setSyncStatus(""), 6000);
-      return;
-    }
     const all = loadReports();
     const entries = Object.entries(all).filter(([, report]) => report && typeof report === "object");
     if (!entries.length) {
